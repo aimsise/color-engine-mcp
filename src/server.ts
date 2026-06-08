@@ -7,6 +7,7 @@ import { registerConvertColor } from './tools/convert_color.js';
 import { registerContrast } from './tools/contrast.js';
 import { registerGamutMap } from './tools/gamut_map.js';
 import { registerGenerateRamp } from './tools/generate_ramp.js';
+import { registerSolveForContrast } from './tools/solve_for_contrast.js';
 
 export const server = new McpServer({
   name: 'color-engine',
@@ -20,6 +21,7 @@ registerConvertColor(server);
 registerContrast(server);
 registerGamutMap(server);
 registerGenerateRamp(server);
+registerSolveForContrast(server);
 
 // Only connect transport when run as entrypoint (not when imported by tests)
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
