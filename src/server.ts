@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import './init.js'; // side-effect: register culori modes
 import { registerParseColor } from './tools/parse_color.js';
 import { registerConvertColor } from './tools/convert_color.js';
+import { registerContrast } from './tools/contrast.js';
 
 export const server = new McpServer({
   name: 'color-engine',
@@ -14,6 +15,7 @@ export const server = new McpServer({
 // inside its tool file; server.ts just wires them in.
 registerParseColor(server);
 registerConvertColor(server);
+registerContrast(server);
 
 // Only connect transport when run as entrypoint (not when imported by tests)
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
