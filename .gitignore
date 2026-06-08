@@ -1,2 +1,9 @@
 # simple-workflow plugin artifacts (local-only; delete entries to share via git)
 .simple-workflow/
+
+# Node / TypeScript build artifacts
+node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+

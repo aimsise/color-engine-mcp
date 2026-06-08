@@ -1,0 +1,30 @@
+{
+  "name": "color-engine-mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "color-engine-mcp": "dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "eslint src/",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "culori": "4.0.2",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/culori": "4.0.1",
+    "@types/node": "22.15.34",
+    "@vitest/coverage-v8": "4.1.8",
+    "eslint": "10.4.1",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.60.1",
+    "vitest": "4.1.8"
+  }
+}
