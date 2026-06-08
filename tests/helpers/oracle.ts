@@ -19,3 +19,21 @@ export function oracleOklch(css: string): { l: number; c: number; h: number | nu
   const [l, c, h] = new Color(css).to('oklch').coords;
   return { l, c, h };
 }
+
+/**
+ * colorjs.io WCAG-2.1 contrast oracle (AC-1). Independent of culori's
+ * `wcagContrast`, so the engine's RAW ratio can be cross-checked against it.
+ * Returns the unrounded WCAG 2.1 contrast ratio between two CSS color strings.
+ */
+export function oracleWcagContrast(a: string, b: string): number {
+  return new Color(a).contrast(b, 'WCAG21');
+}
+
+/**
+ * colorjs.io ΔE2000 oracle (AC-4). Different metric from the engine's
+ * Euclidean-OKLCH ΔE, but confirms perceptual proximity of a swatch to the base
+ * independent of the engine's metric. Returns the unrounded ΔE2000 value.
+ */
+export function oracleDeltaE2000(hexOrCss: string, base: string): number {
+  return new Color(hexOrCss).deltaE(new Color(base), '2000');
+}
