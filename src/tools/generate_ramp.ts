@@ -2,7 +2,9 @@ import '../init.js'; // side-effect: register culori modes (MUST be first import
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { generateRamp } from '../lib/color/ramp.js';
+import { parseColor } from '../lib/color/parse.js';
 import { generateRampInput, GenerateRampOutputSchema } from '../schemas/generate_ramp.js';
+import { validateColorComponents } from '../shared/validation.js';
 
 /** Arguments for the `generate_ramp` tool (mirrors `generateRampInput`). */
 export interface GenerateRampArgs {
@@ -28,6 +30,19 @@ export interface GenerateRampArgs {
  */
 export function generateRampTool(args: GenerateRampArgs): CallToolResult {
   try {
+    // Shared finiteness/range guard on base color + lightness overrides (AC-6).
+    // parseColor has its own finite guard; this is ADDITIVE. Schema .finite() rejects
+    // lightnessMin/Max/deltaL non-finite values at input boundary (T-5 hardening).
+    const preCheck = parseColor(args.base);
+    if (preCheck.ok) {
+      validateColorComponents({ l: preCheck.oklch.l, c: preCheck.oklch.c, h: preCheck.oklch.h });
+    }
+    validateColorComponents({
+      lightnessMin: args.lightnessMin,
+      lightnessMax: args.lightnessMax,
+      deltaL: args.deltaL,
+    });
+
     const r = generateRamp(args.base, args.steps ?? 5, {
       lightnessMin: args.lightnessMin,
       lightnessMax: args.lightnessMax,

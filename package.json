@@ -10,6 +10,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "pretest": "tsc",
     "lint": "eslint src/",
     "test": "vitest run"
   },

@@ -2,7 +2,9 @@ import '../init.js'; // side-effect: register culori modes (MUST be first import
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { gamutMapColor, GamutError } from '../lib/color/gamut.js';
+import { parseColor } from '../lib/color/parse.js';
 import { gamutMapInput, GamutMapOutputSchema } from '../schemas/gamut_map.js';
+import { validateColorComponents } from '../shared/validation.js';
 
 /**
  * Pure tool wrapper for the `gamut_map` computation. Delegates to
@@ -14,6 +16,15 @@ import { gamutMapInput, GamutMapOutputSchema } from '../schemas/gamut_map.js';
  */
 export function gamutMapTool(input: string): CallToolResult {
   try {
+    // Shared finiteness/range guard BEFORE gamutMapColor (AC-6 belt-and-suspenders).
+    // parseColor has its own finite guard; this is ADDITIVE — the shared boundary
+    // intercepts oklch(0.5 1e400 30) before any computation.
+    const preCheck = parseColor(input);
+    if (preCheck.ok) {
+      validateColorComponents({ l: preCheck.oklch.l, c: preCheck.oklch.c, h: preCheck.oklch.h });
+    }
+    // gamutMapColor runs its own assertFiniteOklch + MAX_FINITE_CHROMA guard;
+    // if parseColor returned ok:false, gamutMapColor will also throw GamutError PARSE_FAILED.
     const r = gamutMapColor(input);
     return {
       content: [{ type: 'text', text: JSON.stringify(r) }],

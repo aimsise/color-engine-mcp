@@ -2,7 +2,9 @@ import '../init.js'; // side-effect: register culori modes (MUST be first import
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { convertColor, type ConvertTo } from '../lib/color/convert.js';
+import { parseColor } from '../lib/color/parse.js';
 import { convertColorInput, convertColorOutput } from '../schemas/convert_color.js';
+import { validateColorComponents } from '../shared/validation.js';
 
 /**
  * Black-box tool wrapper for `convert_color`. Delegates to the shared
@@ -12,6 +14,18 @@ import { convertColorInput, convertColorOutput } from '../schemas/convert_color.
  */
 export function convertColorTool(input: string, to: ConvertTo): CallToolResult {
   try {
+    // Shared finiteness/range guard BEFORE conversion (AC-6 belt-and-suspenders).
+    // parseColor routes through the existing finite guard; we extract OKLCH components
+    // and pass them through the shared boundary as well.
+    const parsed = parseColor(input);
+    if (!parsed.ok) {
+      return {
+        content: [{ type: 'text', text: `Error: ${parsed.error}` }],
+        isError: true,
+      };
+    }
+    validateColorComponents({ l: parsed.oklch.l, c: parsed.oklch.c, h: parsed.oklch.h });
+
     const r = convertColor(input, to);
     if (!r.ok) {
       return {

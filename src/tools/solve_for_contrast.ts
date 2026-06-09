@@ -3,6 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { solveForContrast, type SolveArgs, type SolveOutput } from '../lib/color/solve.js';
 import { solveForContrastInput, SolveForContrastOutputSchema } from '../schemas/solve_for_contrast.js';
+import { validateColorComponents } from '../shared/validation.js';
 
 /**
  * Pure tool wrapper for the `solve_for_contrast` computation. Delegates to
@@ -70,6 +71,22 @@ export function solveTool(args: SolveArgs): CallToolResult {
         isError: true,
       };
     }
+
+    // T-7 hardening: reject non-finite hue (mirrors INVALID_CHROMA above).
+    // A non-finite hue is physically meaningless in OKLCH — guard before solve.
+    if (args.hue != null && (typeof args.hue !== 'number' || !Number.isFinite(args.hue))) {
+      return {
+        content: [{ type: 'text', text: 'SolveError: INVALID_HUE' }],
+        isError: true,
+      };
+    }
+
+    // Shared finiteness/range guard (AC-6 belt-and-suspenders). Additive over the
+    // per-field guards above — intercepts the parse-accepted-then-overflows class.
+    validateColorComponents({
+      hue: args.hue,
+      chroma: args.chroma,
+    });
 
     const result: SolveOutput = solveForContrast(args);
 

@@ -3,6 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { parseColor } from '../lib/color/parse.js';
 import { parseColorInput, parseColorOutput } from '../schemas/parse_color.js';
+import { validateColorComponents } from '../shared/validation.js';
 
 /**
  * Black-box tool wrapper for `parse_color`. Delegates to the shared `parseColor`
@@ -20,6 +21,8 @@ export function parseColorTool(input: string): CallToolResult {
         isError: true,
       };
     }
+    // Shared finiteness/range guard — additive over parseColor's own finite guard.
+    validateColorComponents({ l: r.oklch.l, c: r.oklch.c, h: r.oklch.h });
     const structured = { hex: r.hex, rgb: r.rgb, oklch: r.oklch, inGamut: r.inGamut };
     return {
       content: [{ type: 'text', text: JSON.stringify(structured) }],

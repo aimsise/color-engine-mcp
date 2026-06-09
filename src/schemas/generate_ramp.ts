@@ -19,16 +19,20 @@ export const generateRampInput = {
     .optional()
     .describe('Number of swatches (2..512). Default 5.'),
   // Optional lightness controls (all optional; defaults applied in the lib).
+  // .finite() rejects NaN/Infinity at the schema boundary (T-5 hardening).
   lightnessMin: z
     .number()
+    .finite()
     .optional()
     .describe('Lower lightness endpoint (OKLCH L, 0..1). Default 0.05.'),
   lightnessMax: z
     .number()
+    .finite()
     .optional()
     .describe('Upper lightness endpoint (OKLCH L, 0..1). Default 0.97.'),
   deltaL: z
     .number()
+    .finite()
     .optional()
     .describe('Symmetric lightness span centered on the base L (overrides the fixed range).'),
 };

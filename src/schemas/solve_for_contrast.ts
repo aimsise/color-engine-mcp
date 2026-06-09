@@ -57,6 +57,9 @@ export const SolveResultSchema = z.object({
   met: z.boolean(),
   color: z.string().nullable(),
   ratio: z.number().nullable(),
+  // T-6 hardening: nearMiss is an optional additive field present only when
+  // met was granted via the near-ceiling tolerance (not a strict raw >= target).
+  nearMiss: z.boolean().optional(),
 });
 
 /**
@@ -81,4 +84,7 @@ export const SolveForContrastOutputSchema = {
   color: z.string().nullable().optional(),
   ratio: z.number().nullable().optional(),
   results: z.array(SolveResultSchema).optional(),
+  // T-6 hardening: mirror nearMiss in the superset schema so MCP validateToolOutput
+  // does not strip it from single-target results.
+  nearMiss: z.boolean().optional(),
 };
