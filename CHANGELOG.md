@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-06-10
+## [1.0.0] - 2026-06-10
 
 Initial release of `color-engine-mcp`, a stdio MCP server exposing six pure,
 in-memory CSS-color tools: `parse_color`, `convert_color`, `contrast`,
@@ -59,8 +59,8 @@ in-memory CSS-color tools: `parse_color`, `convert_color`, `contrast`,
   single-`target` and the `targets` paths — instead of the old silent
   `met: false / color: null / ratio: null` sentinel.
 - `solve_for_contrast` `targets` now requires at least one entry
-  (schema `.min(1)`); an empty array is rejected at the protocol layer
-  (tool-level `EMPTY_TARGETS` retained for direct callers).
+  (schema `.min(1)`); an empty array is rejected pre-handler by the SDK
+  schema layer (tool-level `EMPTY_TARGETS` retained for direct callers).
 - `generate_ramp` swatch numbers are display-rounded (contrast ratios 2dp,
   OKLCH l/c 5dp, h 2dp); tier classifications still derive from the raw,
   unrounded ratios.
@@ -70,13 +70,41 @@ in-memory CSS-color tools: `parse_color`, `convert_color`, `contrast`,
   `0-255` integer range and is consistent with the hex output; use the
   `inGamut` flag to detect out-of-sRGB-gamut inputs.
 - Numeric input constraints are now declared in the tool schemas and enforced
-  by the MCP SDK at the protocol layer (e.g. `steps` 2..512,
+  pre-handler by the MCP SDK schema layer (e.g. `steps` 2..512,
   `lightnessMin`/`lightnessMax` in `[0, 1]`, `deltaL > 0`, `targets` 1..50,
   256-char string cap); the matching tool-level error codes are retained as
   defense-in-depth for direct library callers.
 
 ### Fixed
 
+- CSS Color 4 `none` channels are now normalized to 0 (per the CSS
+  computed-value rule) at the shared parse boundary, so all six tools accept
+  them. Previously, `gamut_map` leaked an SDK output-validation error
+  (`MCP error -32602`) for an in-gamut input with a `none` chroma (e.g.
+  `oklch(0.5 none 30)`) and wrongly returned `NULL_OKLCH_CHANNELS` for an
+  out-of-gamut input with a `none` lightness; and a `none` channel in an
+  input parsed in the rgb mode (e.g. `rgb(255 none 0)`) failed with
+  `NON_FINITE_COMPONENTS` in the other five tools (surfaced by
+  `solve_for_contrast` as its parameter-named `PARSE_FAILED`). A normalized
+  color that ends up out of the sRGB gamut (e.g. `oklch(none 0.2 30)`) then
+  follows each tool's usual, documented out-of-gamut handling (channel-clamped
+  projection in `parse_color`/`convert_color` vs. perceptual mapping in
+  `gamut_map`), like any other out-of-gamut input.
+- README "Schema-layer vs tool-layer enforcement" section (formerly
+  "Protocol-layer vs tool-layer enforcement") now documents the actual
+  SDK 1.29 wire shape for schema-level rejections: an in-band
+  `isError: true` tool result whose text begins
+  `MCP error -32602: Input validation error: ...` (the handler never runs),
+  not a true protocol error; error-table rows for schema-enforced codes were
+  aligned to match.
+- README now documents that `gamut_map` returns `CHROMA_OUT_OF_RANGE` for
+  absurd-magnitude chroma such as `oklch(0.5 1e30 30)` — an exception to the
+  `COMPONENT_OUT_OF_RANGE` code the other tools return — and that
+  `solve_for_contrast` coalesces that parse-boundary failure into its
+  parameter-named `PARSE_FAILED`; it also states that CSS Color 4 `none`
+  channels are normalized to 0 in all six tools, and that an input whose
+  normalized color is out of the sRGB gamut then follows each tool's usual
+  out-of-gamut handling.
 - README `generate_ramp` example showed a first swatch with `step: 1` —
   swatch indices are zero-based (`step: 0` is the lightest swatch).
 - README `deltaL` wording: `deltaL` is the **total** lightness span centered
@@ -102,4 +130,4 @@ in-memory CSS-color tools: `parse_color`, `convert_color`, `contrast`,
   (GHSA-w7jw-789q-3m8p affects <= 1.8.3); `npm audit` reports 0
   vulnerabilities.
 
-[0.1.0]: https://github.com/aimsise/color-engine-mcp/releases/tag/v0.1.0
+[1.0.0]: https://github.com/aimsise/color-engine-mcp/releases/tag/v1.0.0
