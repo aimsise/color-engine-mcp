@@ -7,3 +7,6 @@ dist/
 *.tsbuildinfo
 npm-debug.log*
 
+# Test coverage output
+coverage/
+

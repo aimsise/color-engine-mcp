@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Least-privilege token: the workflow only reads the repo contents.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint & Test (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      # npm ci installs from package-lock.json (includes the
+      # @modelcontextprotocol/inspector devDependency so the Inspector
+      # integration test resolves offline).
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # `npm test` runs the pretest `tsc` build then vitest (incl. the
+      # MCP Inspector integration test). No --coverage here so Inspector
+      # timing is unaffected.
+      - name: Test
+        run: npm test
+
+      - name: Coverage
+        run: npm run coverage

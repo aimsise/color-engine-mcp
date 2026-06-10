@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.aimsise/color-engine-mcp",
+  "description": "stdio MCP server exposing six pure, in-memory CSS-color tools: parse, convert, WCAG contrast, sRGB gamut mapping, OKLCH color-ramp generation, and contrast solving.",
+  "repository": {
+    "url": "https://github.com/aimsise/color-engine-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "color-engine-mcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

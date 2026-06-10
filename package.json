@@ -1,6 +1,29 @@
 {
   "name": "color-engine-mcp",
   "version": "0.1.0",
+  "mcpName": "io.github.aimsise/color-engine-mcp",
+  "description": "stdio MCP server exposing six pure, in-memory CSS-color tools: parse, convert, WCAG contrast, sRGB gamut mapping, OKLCH color-ramp generation, and contrast solving.",
+  "license": "MIT",
+  "author": "color-engine-mcp contributors",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "color",
+    "oklch",
+    "wcag",
+    "contrast",
+    "gamut",
+    "srgb",
+    "accessibility"
+  ],
+  "homepage": "https://github.com/aimsise/color-engine-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aimsise/color-engine-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aimsise/color-engine-mcp/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -8,18 +31,29 @@
   "bin": {
     "color-engine-mcp": "dist/server.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepare": "tsc",
+    "prepublishOnly": "npm run build",
     "pretest": "tsc",
     "lint": "eslint src/",
-    "test": "vitest run"
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "bench": "node scripts/bench.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
     "culori": "4.0.2",
     "zod": "4.4.3"
   },
+  "overrides": {
+    "shell-quote": "1.8.4"
+  },
   "devDependencies": {
+    "@modelcontextprotocol/inspector": "^0.22.0",
     "@types/culori": "4.0.1",
     "@types/node": "22.15.34",
     "@vitest/coverage-v8": "4.1.8",
