@@ -19,8 +19,9 @@ export function convertColorTool(input: string, to: ConvertTo): CallToolResult {
     // and pass them through the shared boundary as well.
     const parsed = parseColor(input);
     if (!parsed.ok) {
+      // parsed.error is now a full "<CODE>: msg" string — forward verbatim (uniform contract).
       return {
-        content: [{ type: 'text', text: `Error: ${parsed.error}` }],
+        content: [{ type: 'text', text: parsed.error }],
         isError: true,
       };
     }
@@ -28,8 +29,9 @@ export function convertColorTool(input: string, to: ConvertTo): CallToolResult {
 
     const r = convertColor(input, to);
     if (!r.ok) {
+      // r.error is now a full "<CODE>: msg" string — forward verbatim (uniform contract).
       return {
-        content: [{ type: 'text', text: `Error: ${r.error}` }],
+        content: [{ type: 'text', text: r.error }],
         isError: true,
       };
     }
@@ -39,10 +41,10 @@ export function convertColorTool(input: string, to: ConvertTo): CallToolResult {
       structuredContent: structured,
     };
   } catch {
-    // Static, sanitized message — never forward internal error detail (path,
-    // stack, library internals) to the caller.
+    // Static, sanitized code-keyed message — never forward internal error detail
+    // (path, stack, library internals) to the caller (uniform catch-all).
     return {
-      content: [{ type: 'text', text: 'unexpected internal error' }],
+      content: [{ type: 'text', text: 'INTERNAL_ERROR: unexpected internal error' }],
       isError: true,
     };
   }
@@ -57,6 +59,14 @@ export function registerConvertColor(server: McpServer): void {
         'Convert a CSS color string into a canonical hex, rgb, hsl, or oklch format string.',
       inputSchema: convertColorInput,
       outputSchema: convertColorOutput,
+      // MCP-1: read-only, side-effect-free, deterministic, local-only computation.
+      annotations: {
+        title: 'Convert CSS Color',
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+        destructiveHint: false,
+      },
     },
     async ({ input, to }) => convertColorTool(input, to)
   );

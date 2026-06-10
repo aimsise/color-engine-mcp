@@ -15,6 +15,12 @@ export default tseslint.config(
     },
   },
   {
-    ignores: ['dist/**', 'node_modules/**'],
+    // Plain-JS config and script files are not part of the typed-lint
+    // project; lint them without type information.
+    files: ['**/*.mjs'],
+    ...tseslint.configs.disableTypeChecked,
+  },
+  {
+    ignores: ['dist/**', 'node_modules/**', 'coverage/**', '.simple-workflow/**'],
   }
 );

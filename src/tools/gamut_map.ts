@@ -32,14 +32,13 @@ export function gamutMapTool(input: string): CallToolResult {
     };
   } catch (e) {
     // Sanitize: do not reflect raw user input into the error response.
-    // GamutError messages are code-keyed (PARSE_FAILED, NULL_OKLCH_CHANNELS,
-    // NON_FINITE_OKLCH_COMPONENTS, NON_FINITE_OKLCH_HUE, CHROMA_OUT_OF_RANGE,
-    // GAMUT_MAP_COLLAPSE). Unknown errors are masked to prevent accidental PII /
-    // internal detail leakage.
+    // GamutError.message is now a full "<CODE>: msg" string (PARSE_FAILED,
+    // NULL_OKLCH_CHANNELS, NON_FINITE_OKLCH_COMPONENTS, NON_FINITE_OKLCH_HUE,
+    // CHROMA_OUT_OF_RANGE, GAMUT_MAP_COLLAPSE, INPUT_TOO_LONG) — forward verbatim.
+    // Unknown errors are masked to the uniform catch-all to prevent accidental
+    // PII / internal-detail leakage.
     const errText =
-      e instanceof GamutError
-        ? `GamutError: ${e.message}`
-        : 'GamutError: INTERNAL_ERROR';
+      e instanceof GamutError ? e.message : 'INTERNAL_ERROR: unexpected internal error';
     return {
       content: [{ type: 'text', text: errText }],
       isError: true,
@@ -56,6 +55,14 @@ export function registerGamutMap(server: McpServer): void {
         'Map any CSS color string into the sRGB gamut via perceptual OKLCH chroma reduction. Returns the nearest in-gamut hex, raw OKLCH components, and a `clamped` flag indicating whether the input was out-of-gamut.',
       inputSchema: gamutMapInput,
       outputSchema: GamutMapOutputSchema,
+      // MCP-1: read-only, side-effect-free, deterministic, local-only computation.
+      annotations: {
+        title: 'Gamut-Map to sRGB',
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+        destructiveHint: false,
+      },
     },
     async ({ input }) => gamutMapTool(input)
   );

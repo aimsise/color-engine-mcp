@@ -19,6 +19,12 @@ export type ConvertResult = ConvertOk | ConvertErr;
  *   - rgb   → "rgb(R, G, B)"        (integer channels)
  *   - oklch → "oklch(L C H)"        (L & C 5dp, H 2dp)
  *   - hsl   → "hsl(H, S%, L%)"      (H/S/L 2dp, S & L as percentages)
+ *
+ * Raw-vs-clamped behavior (ALG-5): for an OUT-OF-GAMUT input the `oklch` target
+ * returns the RAW (lossless) OKLCH triple from `parseColor`, whereas `hex`/`rgb`/
+ * `hsl` are all derived from the sRGB-CLAMPED projection (`parsed.hex` / the
+ * clamped `parsed.rgb`). So `to:'oklch'` round-trips an out-of-gamut color
+ * faithfully while the other three targets report the in-gamut sRGB approximation.
  */
 export function convertColor(input: string, to: ConvertTo): ConvertResult {
   const parsed = parseColor(input);
@@ -58,13 +64,13 @@ export function convertColor(input: string, to: ConvertTo): ConvertResult {
       // is the canonical, in-gamut representation of the input.
       const hsl = toHsl(parsed.hex);
       if (!hsl) {
-        return { ok: false, error: 'non-finite color components' };
+        return { ok: false, error: 'NON_FINITE_COMPONENTS: color resolved to non-finite components' };
       }
       const h = Number.isFinite(hsl.h) ? (hsl.h as number) : 0;
       const s = (hsl.s ?? 0) * 100;
       const lPct = (hsl.l ?? 0) * 100;
       if (!Number.isFinite(s) || !Number.isFinite(lPct)) {
-        return { ok: false, error: 'non-finite color components' };
+        return { ok: false, error: 'NON_FINITE_COMPONENTS: color resolved to non-finite components' };
       }
       return {
         ok: true,
@@ -73,9 +79,11 @@ export function convertColor(input: string, to: ConvertTo): ConvertResult {
     }
 
     default: {
-      // Exhaustiveness guard — unreachable when `to` is validated by zod.
+      // Exhaustiveness guard — unreachable when `to` is validated by zod. Use a
+      // static code string (no value echo) to honor the uniform error contract.
       const _never: never = to;
-      return { ok: false, error: `unsupported conversion target "${String(_never)}"` };
+      void _never;
+      return { ok: false, error: 'INTERNAL_ERROR: unexpected internal error' };
     }
   }
 }

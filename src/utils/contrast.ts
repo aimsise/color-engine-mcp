@@ -1,4 +1,4 @@
-import '../init.js'; // side-effect: register culori modes (modeLrgb required for wcagContrast)
+import { toRgb } from '../init.js'; // side-effect: registers culori modes (modeLrgb required for wcagContrast)
 import { wcagContrast } from 'culori/fn';
 import { parseColor } from '../lib/color/parse.js';
 
@@ -23,6 +23,40 @@ export type WcagTiers = {
 };
 
 /**
+ * Static error text for translucent inputs (sanctioned change: contrast and
+ * solve_for_contrast reject alpha < 1). Treating a 10%-opacity color as opaque
+ * is dangerously wrong for accessibility — the effective color depends on an
+ * unknown backdrop — so the caller must composite first.
+ */
+export const ALPHA_UNSUPPORTED_MESSAGE =
+  'ALPHA_UNSUPPORTED: contrast requires fully opaque colors (alpha = 1); composite the color over its backdrop first';
+
+/**
+ * True when a color string parses with an EXPLICIT alpha channel < 1 — covers
+ * rgba(...)/hsla(...) functional alpha, and 8-digit / 4-digit hex. A color with
+ * no alpha component, or with alpha exactly 1 (e.g. `rgba(255 0 0 / 1)`), is
+ * fully opaque and allowed. Unparseable input returns false (the parse-failure
+ * path reports it instead).
+ */
+export function isTranslucent(input: string): boolean {
+  if (typeof input !== 'string') return false;
+  const rgb = toRgb(input.trim());
+  return rgb !== undefined && rgb.alpha !== undefined && rgb.alpha < 1;
+}
+
+/**
+ * Rename ONLY the generic PARSE_FAILED code so the static error names the
+ * failing parameter (ERR-2). Other code-keyed messages (INPUT_TOO_LONG,
+ * NON_FINITE_COMPONENTS, COMPONENT_OUT_OF_RANGE, ...) are forwarded verbatim.
+ * SEC-3 holds: the text is fully static — raw user input is NEVER echoed.
+ */
+function namedParseError(error: string, role: 'foreground' | 'background'): string {
+  return error.startsWith('PARSE_FAILED')
+    ? `PARSE_FAILED: could not parse the ${role} color`
+    : error;
+}
+
+/**
  * Compute the raw (pre-rounding) WCAG 2.1 contrast ratio between two CSS color
  * strings. Passes `parsed.hex` (a valid `#rrggbb` string) to `wcagContrast` —
  * NEVER `parsed.rgb` (integer 0-255 channels; passing those would corrupt the
@@ -32,16 +66,24 @@ export type WcagTiers = {
  * this helper (`gamut_map`, `generate_ramp`, `solve_for_contrast`) inherits the
  * guard automatically — no duplication needed in each tool handler.
  *
- * @throws {ContrastError} when either input fails to parse OR the computed ratio
+ * @throws {ContrastError} when either input fails to parse, when either input is
+ *   translucent (explicit alpha < 1 — ALPHA_UNSUPPORTED), OR the computed ratio
  *   is non-finite (e.g. overflow from an extreme out-of-gamut color that survived
  *   parseColor's own finite check).
  */
 export function wcagContrastRaw(a: string, b: string): number {
+  // `parseColor` returns a full "<CODE>: msg" string in `.error`; PARSE_FAILED is
+  // renamed to identify the failing parameter (ERR-2 — foreground checked first),
+  // every other code is forwarded verbatim. The translucency guard (CE-3) runs
+  // right after each successful parse: alpha < 1 would silently corrupt the
+  // luminance computation, so it is a typed error, never a wrong number.
   const pa = parseColor(a);
-  if (!pa.ok) throw new ContrastError(pa.error);
+  if (!pa.ok) throw new ContrastError(namedParseError(pa.error, 'foreground'));
+  if (isTranslucent(a)) throw new ContrastError(ALPHA_UNSUPPORTED_MESSAGE);
 
   const pb = parseColor(b);
-  if (!pb.ok) throw new ContrastError(pb.error);
+  if (!pb.ok) throw new ContrastError(namedParseError(pb.error, 'background'));
+  if (isTranslucent(b)) throw new ContrastError(ALPHA_UNSUPPORTED_MESSAGE);
 
   // Pass hex strings (valid #rrggbb) — not the integer rgb object.
   const ratio = wcagContrast(pa.hex, pb.hex);
@@ -50,7 +92,7 @@ export function wcagContrastRaw(a: string, b: string): number {
   // Infinity/NaN if modeLrgb linearization produces extreme values for colors
   // that parseColor's finite check let through (out-of-gamut clamping edge cases).
   if (!Number.isFinite(ratio)) {
-    throw new ContrastError('non-finite luminance');
+    throw new ContrastError('NON_FINITE_LUMINANCE: non-finite luminance');
   }
 
   return ratio;

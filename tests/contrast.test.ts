@@ -449,6 +449,109 @@ describe('AC-8 — no network / no fs-write in production source', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Helper — extract the single text content of a CallToolResult
+// ---------------------------------------------------------------------------
+
+function resultText(result: ReturnType<typeof contrastTool>): string {
+  return (result.content[0] as { type: 'text'; text: string }).text;
+}
+
+// ---------------------------------------------------------------------------
+// CE-3 — translucent inputs rejected (ALPHA_UNSUPPORTED)
+// A 10%-opacity color treated as opaque is dangerously wrong for accessibility:
+// the effective color depends on the unknown backdrop. alpha exactly 1 is allowed.
+// ---------------------------------------------------------------------------
+
+const ALPHA_MSG =
+  'ALPHA_UNSUPPORTED: contrast requires fully opaque colors (alpha = 1); composite the color over its backdrop first';
+
+describe('CE-3 — translucent inputs are rejected with ALPHA_UNSUPPORTED', () => {
+  const translucentCases: [string, string, string][] = [
+    ['rgba(255 0 0 / 0.1)', '#ffffff', 'rgba functional alpha (foreground)'],
+    ['#ff000080', '#ffffff', '8-digit hex alpha (foreground)'],
+    ['#f00a', '#ffffff', '4-digit hex alpha (foreground)'],
+    ['hsla(0, 100%, 50%, 0.3)', '#ffffff', 'hsla legacy alpha (foreground)'],
+    ['#ffffff', 'rgba(0 0 0 / 0.5)', 'rgba functional alpha (background)'],
+    ['#ffffff', '#00000080', '8-digit hex alpha (background)'],
+  ];
+
+  for (const [a, b, label] of translucentCases) {
+    it(`${label}: isError with the exact static ALPHA_UNSUPPORTED message`, () => {
+      const result = contrastTool(a, b);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toBeUndefined();
+      expect(resultText(result)).toBe(ALPHA_MSG);
+    });
+  }
+
+  it('alpha exactly 1 (rgba(255 0 0 / 1)) is still allowed and computes a ratio', () => {
+    const result = contrastTool('rgba(255 0 0 / 1)', '#ffffff');
+    expect(result.isError).toBeUndefined();
+    const sc = result.structuredContent as { ratio: number };
+    expect(Number.isFinite(sc.ratio)).toBe(true);
+    // Same ratio as the fully opaque spelling of the same color.
+    const opaque = contrastTool('#ff0000', '#ffffff');
+    expect(sc.ratio).toBe((opaque.structuredContent as { ratio: number }).ratio);
+  });
+
+  it('colors without an alpha component are unaffected', () => {
+    const result = contrastTool('#ff0000', '#ffffff');
+    expect(result.isError).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ERR-2 — parse failures name the offending parameter (foreground checked first)
+// The message stays fully static: raw user input is NEVER echoed back.
+// ---------------------------------------------------------------------------
+
+describe('ERR-2 — parse errors name the failing parameter', () => {
+  const FG_MSG = 'PARSE_FAILED: could not parse the foreground color';
+  const BG_MSG = 'PARSE_FAILED: could not parse the background color';
+
+  it('unparseable foreground yields the foreground-named static message', () => {
+    const result = contrastTool('not-a-color', '#ffffff');
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toBe(FG_MSG);
+  });
+
+  it('unparseable background yields the background-named static message', () => {
+    const result = contrastTool('#ffffff', 'not-a-color');
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toBe(BG_MSG);
+  });
+
+  it('both unparseable: foreground is checked first', () => {
+    const result = contrastTool('not-a-color', 'also-not-a-color');
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toBe(FG_MSG);
+  });
+
+  it('empty-string foreground also yields the foreground-named message', () => {
+    const result = contrastTool('', '#ffffff');
+    expect(result.isError).toBe(true);
+    expect(resultText(result)).toBe(FG_MSG);
+  });
+
+  it('error text never echoes the raw input (SEC-3)', () => {
+    const probe = 'zz-bogus-color-probe';
+    for (const [a, b] of [
+      [probe, '#ffffff'],
+      ['#ffffff', probe],
+    ] as [string, string][]) {
+      const result = contrastTool(a, b);
+      expect(result.isError).toBe(true);
+      expect(resultText(result)).not.toContain(probe);
+    }
+  });
+
+  it('wcagContrastRaw (shared utility) throws the same named messages', () => {
+    expect(() => wcagContrastRaw('not-a-color', '#ffffff')).toThrow(FG_MSG);
+    expect(() => wcagContrastRaw('#ffffff', 'not-a-color')).toThrow(BG_MSG);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // modeLrgb isolation canary — proves import '../init.js' side-effect works
 // ---------------------------------------------------------------------------
 

@@ -166,6 +166,76 @@ describe('AC-8 convert_color adversarial → isError OR finite, < 500 ms', () =>
   }
 });
 
+// ---------------------------------------------------------------------------
+// TEST-6 — achromatic hsl hue, out-of-gamut clamped rgb/hsl, adversarial isError
+// ---------------------------------------------------------------------------
+
+describe('TEST-6 — achromatic + out-of-gamut + adversarial convert paths', () => {
+  it('achromatic input #808080 → hsl with hue 0 (no NaN hue leak)', () => {
+    const r = convertColor('#808080', 'hsl');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // Grey is achromatic (colorjs.io reports h=null); the engine reports hue 0 and
+    // saturation 0. Assert the canonical shape AND the leading "0.00" hue token.
+    expect(r.result).toMatch(/^hsl\(0\.00, 0\.00%, \d+\.\d{2}%\)$/);
+  });
+
+  it('out-of-gamut OKLCH oklch(0.6 0.4 30) → to:"hsl" is a valid in-gamut hsl string', () => {
+    // hex/rgb/hsl targets are derived from the sRGB-CLAMPED projection (ALG-5), so
+    // hsl is a well-formed, finite triple even though the input is out of gamut.
+    const r = convertColor('oklch(0.6 0.4 30)', 'hsl');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.result).toMatch(/^hsl\(\d+\.\d{2}, \d+\.\d{2}%, \d+\.\d{2}%\)$/);
+    expect(r.result).not.toMatch(/NaN|Infinity|-/);
+  });
+
+  it('out-of-gamut OKLCH oklch(0.6 0.4 30) → to:"rgb" has CLAMPED, valid 0-255 integer channels', () => {
+    // ALG-4/MCP-6: the rgb projection is the sRGB-clamped triple, NOT a raw
+    // out-of-range channel. Parse the rgb(R, G, B) string and assert each channel
+    // is an integer in [0, 255].
+    const r = convertColor('oklch(0.6 0.4 30)', 'rgb');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const m = /^rgb\((\d+), (\d+), (\d+)\)$/.exec(r.result);
+    expect(m, `rgb result "${r.result}" must match rgb(R, G, B)`).not.toBeNull();
+    if (!m) return;
+    for (const ch of [m[1], m[2], m[3]]) {
+      const n = Number(ch);
+      expect(Number.isInteger(n)).toBe(true);
+      expect(n).toBeGreaterThanOrEqual(0);
+      expect(n).toBeLessThanOrEqual(255);
+    }
+
+    // And parse_color agrees: the same out-of-gamut input clamps rgb into [0,255]
+    // while inGamut reports the truth (false). (ALG-4 source-of-truth check.)
+    const p = parseColor('oklch(0.6 0.4 30)');
+    expect(p.ok).toBe(true);
+    if (!p.ok) return;
+    expect(p.inGamut).toBe(false);
+    for (const ch of [p.rgb.r, p.rgb.g, p.rgb.b]) {
+      expect(Number.isInteger(ch)).toBe(true);
+      expect(ch).toBeGreaterThanOrEqual(0);
+      expect(ch).toBeLessThanOrEqual(255);
+    }
+  });
+
+  it('adversarial oklch(0.5 1e400 30) → to:"hsl" and to:"rgb" both → isError (NON_FINITE_COMPONENTS)', () => {
+    for (const to of ['hsl', 'rgb'] as const) {
+      const res = convertColorTool('oklch(0.5 1e400 30)', to);
+      expect(res.isError, `${to} must isError on Infinity chroma`).toBe(true);
+      expect(res.structuredContent).toBeUndefined();
+      const text =
+        res.content?.[0]?.type === 'text'
+          ? (res.content[0] as { type: string; text: string }).text
+          : '';
+      // Uniform "<CODE>: msg" contract; no raw-input echo.
+      expect(text).toBe('NON_FINITE_COMPONENTS: color resolved to non-finite components');
+      expect(text).not.toContain('1e400');
+    }
+  });
+});
+
 describe('AC-4 process resilience: handlers never throw / exit', () => {
   it('parse_color + convert_color tolerate garbage without unhandled rejection', () => {
     const garbage = ['', 'not-a-color', '#12', 'oklch(0.5 1e400 30)'];

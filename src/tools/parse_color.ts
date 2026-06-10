@@ -16,8 +16,10 @@ export function parseColorTool(input: string): CallToolResult {
   try {
     const r = parseColor(input);
     if (!r.ok) {
+      // r.error is now a full "<CODE>: msg" string (INPUT_TOO_LONG / PARSE_FAILED /
+      // NON_FINITE_COMPONENTS) — forward verbatim, no extra prefix (uniform error contract).
       return {
-        content: [{ type: 'text', text: `Error: ${r.error}` }],
+        content: [{ type: 'text', text: r.error }],
         isError: true,
       };
     }
@@ -29,10 +31,10 @@ export function parseColorTool(input: string): CallToolResult {
       structuredContent: structured,
     };
   } catch {
-    // Static, sanitized message — never forward internal error detail (path,
-    // stack, library internals) to the caller.
+    // Static, sanitized code-keyed message — never forward internal error detail
+    // (path, stack, library internals) to the caller (uniform catch-all).
     return {
-      content: [{ type: 'text', text: 'unexpected internal error' }],
+      content: [{ type: 'text', text: 'INTERNAL_ERROR: unexpected internal error' }],
       isError: true,
     };
   }
@@ -46,6 +48,14 @@ export function registerParseColor(server: McpServer): void {
       description: 'Parse a CSS color string and return hex, rgb, oklch, and gamut info.',
       inputSchema: parseColorInput,
       outputSchema: parseColorOutput,
+      // MCP-1: read-only, side-effect-free, deterministic, local-only computation.
+      annotations: {
+        title: 'Parse CSS Color',
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+        destructiveHint: false,
+      },
     },
     async ({ input }) => parseColorTool(input)
   );

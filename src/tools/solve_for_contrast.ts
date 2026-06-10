@@ -28,7 +28,7 @@ export function solveTool(args: SolveArgs): CallToolResult {
       args.background.length === 0
     ) {
       return {
-        content: [{ type: 'text', text: 'SolveError: MISSING_BACKGROUND' }],
+        content: [{ type: 'text', text: 'MISSING_BACKGROUND: background color string is required' }],
         isError: true,
       };
     }
@@ -37,7 +37,17 @@ export function solveTool(args: SolveArgs): CallToolResult {
     const hasTarget = typeof args.target === 'number';
     if (!hasTargets && !hasTarget) {
       return {
-        content: [{ type: 'text', text: 'SolveError: MISSING_TARGET' }],
+        content: [{ type: 'text', text: 'MISSING_TARGET: provide target or targets' }],
+        isError: true,
+      };
+    }
+
+    // Mirror the schema `.min(1)` (SOLVE-2) for direct-handler callers: an empty
+    // `targets` array is rejected at the protocol layer by the SDK, but a direct
+    // call would otherwise yield a useless `{ results: [] }`.
+    if (hasTargets && (args.targets as number[]).length === 0) {
+      return {
+        content: [{ type: 'text', text: 'EMPTY_TARGETS: targets must contain at least one target' }],
         isError: true,
       };
     }
@@ -46,7 +56,7 @@ export function solveTool(args: SolveArgs): CallToolResult {
     // schema `.max(50)` for direct-handler callers that bypass SDK validation).
     if (hasTargets && (args.targets as number[]).length > 50) {
       return {
-        content: [{ type: 'text', text: 'SolveError: TOO_MANY_TARGETS' }],
+        content: [{ type: 'text', text: 'TOO_MANY_TARGETS: at most 50 targets are allowed' }],
         isError: true,
       };
     }
@@ -56,7 +66,7 @@ export function solveTool(args: SolveArgs): CallToolResult {
     for (const t of targetList) {
       if (typeof t !== 'number' || !Number.isFinite(t) || t < 0) {
         return {
-          content: [{ type: 'text', text: 'SolveError: INVALID_TARGET' }],
+          content: [{ type: 'text', text: 'INVALID_TARGET: each target must be a finite number >= 0' }],
           isError: true,
         };
       }
@@ -67,7 +77,7 @@ export function solveTool(args: SolveArgs): CallToolResult {
     // SDK schema validation, so guard here too — clean isError, never a throw.
     if (args.chroma != null && (typeof args.chroma !== 'number' || !Number.isFinite(args.chroma) || args.chroma < 0)) {
       return {
-        content: [{ type: 'text', text: 'SolveError: INVALID_CHROMA' }],
+        content: [{ type: 'text', text: 'INVALID_CHROMA: chroma must be a finite number >= 0' }],
         isError: true,
       };
     }
@@ -76,7 +86,7 @@ export function solveTool(args: SolveArgs): CallToolResult {
     // A non-finite hue is physically meaningless in OKLCH — guard before solve.
     if (args.hue != null && (typeof args.hue !== 'number' || !Number.isFinite(args.hue))) {
       return {
-        content: [{ type: 'text', text: 'SolveError: INVALID_HUE' }],
+        content: [{ type: 'text', text: 'INVALID_HUE: hue must be a finite number' }],
         isError: true,
       };
     }
@@ -90,6 +100,28 @@ export function solveTool(args: SolveArgs): CallToolResult {
 
     const result: SolveOutput = solveForContrast(args);
 
+    // SOLVE-1 / CE-3: the lib signals boundary failures with a DISCRIMINATED
+    // `{ error: code }` return (never the old silent met:false/color:null/
+    // ratio:null sentinel, which falsely told callers the target was
+    // unreachable). Map each code to its static, code-keyed message — applies
+    // identically to the single-target and the `targets` paths, because the lib
+    // resolves the background ONCE before either path branches.
+    if ('error' in result) {
+      const text =
+        result.error === 'ALPHA_UNSUPPORTED'
+          ? // CE-3: identical wording to the contrast tool.
+            'ALPHA_UNSUPPORTED: contrast requires fully opaque colors (alpha = 1); composite the color over its backdrop first'
+          : result.error === 'INVALID_GEOMETRY'
+            ? // Unreachable via this tool (hue/chroma validated above); kept for
+              // exhaustiveness over the lib's typed codes.
+              'INVALID_GEOMETRY: hue and chroma must be finite numbers (chroma >= 0)'
+            : 'PARSE_FAILED: could not parse the background color';
+      return {
+        content: [{ type: 'text', text }],
+        isError: true,
+      };
+    }
+
     // The solver is total; `structuredContent` is already a top-level object.
     return {
       content: [{ type: 'text', text: JSON.stringify(result) }],
@@ -99,10 +131,10 @@ export function solveTool(args: SolveArgs): CallToolResult {
     // Mask unexpected internals so nothing leaks across the MCP boundary: use a
     // FIXED code-keyed string, never the raw `e.message` (which could embed
     // input-derived text from a future library throw — info-disclosure channel).
-    // T4/T5 code-keyed-error convention. The solver is total, so this is a
-    // defence-in-depth path that should not be reachable in practice.
+    // Uniform catch-all. The solver is total, so this is a defence-in-depth path
+    // that should not be reachable in practice.
     return {
-      content: [{ type: 'text', text: 'SolveError: INTERNAL_ERROR' }],
+      content: [{ type: 'text', text: 'INTERNAL_ERROR: unexpected internal error' }],
       isError: true,
     };
   }
@@ -114,9 +146,21 @@ export function registerSolveForContrast(server: McpServer): void {
     'solve_for_contrast',
     {
       description:
-        'Find a foreground color that meets one or more WCAG 2.1 contrast targets against a background. Binary-searches OKLCH lightness (holding hue/chroma fixed) and returns the nearest-compliant hex plus the achieved ratio. Pass `target` for one target or `targets` for several; `prefer` selects lighter/darker/either; `hue`/`chroma` pin the foreground chromaticity.',
+        'Find a foreground color that meets one or more WCAG 2.1 contrast targets against a background. Binary-searches OKLCH lightness (holding hue/chroma fixed) and returns the nearest-compliant hex plus the achieved ratio. Pass `target` for one target or `targets` for several; `prefer` selects lighter/darker/either; `hue`/`chroma` pin the foreground chromaticity. ' +
+        // MCP-3: target/targets precedence. MCP-5: single-vs-multi response shape.
+        'If BOTH `target` and `targets` are provided, `targets` takes precedence. The response shape differs by mode: a single `target` returns `{ met, color, ratio }` (with an optional `nearMiss` flag); `targets` returns `{ results: [{ met, color, ratio, nearMiss? }, ...] }`. The output schema is an all-optional superset of both shapes (SDK 1.29 single-shape limitation). ' +
+        // SOLVE-1 / CE-3: surface the typed error contract to LLM consumers.
+        'An unparseable background returns the PARSE_FAILED error; a translucent background (alpha < 1, e.g. rgba()/hsla()/#rgba/#rrggbbaa) returns ALPHA_UNSUPPORTED — composite it over its backdrop first.',
       inputSchema: solveForContrastInput,
       outputSchema: SolveForContrastOutputSchema,
+      // MCP-1: read-only, side-effect-free, deterministic, local-only computation.
+      annotations: {
+        title: 'Solve for Contrast Target',
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+        destructiveHint: false,
+      },
     },
     async (args) => solveTool(args as SolveArgs)
   );

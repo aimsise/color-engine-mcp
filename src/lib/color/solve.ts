@@ -1,5 +1,6 @@
 import '../../init.js'; // side-effect: register culori modes (MUST be first import)
 import { formatHex } from 'culori/fn';
+import { toRgb } from '../../init.js';
 import { mapToSRGB, inGamutRgb } from './gamut.js';
 import { wcagContrastRaw } from '../../utils/contrast.js';
 import { parseColor } from './parse.js';
@@ -17,9 +18,15 @@ import { parseColor } from './parse.js';
  * converging to the NEAREST-COMPLIANT lightness (the one that JUST meets the
  * target) rather than overshooting to pure black/white.
  *
- * The lib is TOTAL: it never throws across its boundary. Unparseable
- * backgrounds, non-finite candidate components, and unreachable targets all
- * resolve to a structured `{ met: false, ... }` result.
+ * The lib is TOTAL: it never throws across its boundary. Unreachable targets
+ * resolve to a structured `{ met: false, ... }` result. Boundary failures are
+ * signalled with a DISCRIMINATED `{ error: SolveErrorCode }` return (never the
+ * old silent `{ met:false, color:null, ratio:null }` sentinel, which falsely
+ * told callers the target was unreachable):
+ *   - `PARSE_FAILED`      — the background string did not parse;
+ *   - `ALPHA_UNSUPPORTED` — the background parsed but is translucent (alpha < 1);
+ *   - `INVALID_GEOMETRY`  — a direct-lib caller supplied a non-finite or negative
+ *     hue/chroma override (unreachable via the tool, which validates first).
  */
 
 /** Below this chroma a color is achromatic; its OKLCH hue is undefined/NaN. */
@@ -45,24 +52,32 @@ const SEARCH_ITERS = 30;
  * decimal place, at which 4.478 rounds to 4.5 — i.e. a 4.478:1 white-on-grey pair
  * is treated as meeting 4.5:1 by standard accessibility reporting.
  *
- * This tolerance is applied EXCLUSIVELY to the peak-fallback branch (when the
- * band contains NO color whose raw ratio ≥ target): if the band's best attainable
- * ratio is within `MET_TOL` of the target, the peak is reported `met:true`. It is
- * NOT applied when a strictly-compliant color exists — those paths (AC-1 [4.5,4.7],
- * AC-2 [7.0,7.25], AC-3, AC-5) keep selecting the smallest-margin color with raw
- * ratio ≥ target, so their independent colorjs.io oracle bands are unaffected.
+ * This tolerance is applied EXCLUSIVELY to the peak-fallback branch of a SEARCHED
+ * band (when that band contains NO color whose raw ratio ≥ target): if the band's
+ * best attainable ratio is within `MET_TOL` BELOW the target, the peak is reported
+ * `met:true` with `nearMiss:true`. It is NOT applied when a strictly-compliant
+ * color exists in the band — those paths (AC-1 [4.5,4.7], AC-2 [7.0,7.25], AC-3,
+ * AC-5) keep selecting the smallest-margin color with raw ratio ≥ target, so their
+ * independent colorjs.io oracle bands are unaffected.
+ *
+ * IMPORTANT (ALG-6): "near-miss" is a per-BAND / per-DIRECTION statement, NOT a
+ * claim that the target is unreachable on every direction. Under a directional
+ * `prefer` only that one band is searched, so a `nearMiss:true` result there does
+ * NOT rule out a strictly-compliant color in the opposite direction. In the
+ * 'either' path the tolerance only decides the outcome when NEITHER searched band
+ * strictly meets the target; if either band strictly meets it, `solveSingle`
+ * returns that strict result and never reports a near-miss.
  *
  * Sizing: it must cover the AC-7 near-miss gaps (darker ≈0.011 / lighter ≈0.022)
- * while staying far below any genuinely-unreachable gap. AC-4 (target 22, sRGB
- * ceiling 21) has a gap of ≈1.0 and therefore stays `met:false`. `0.03` covers the
- * AC-7 lighter gap (0.022) with headroom yet is tight enough that it does NOT widen
- * the sub-threshold window: the round-2 Critical (a near-miss raw 2.998 reported
- * met:true for target 3 while a compliant color existed on the other side) is fixed
- * primarily by deciding compliance on the RAW ratio (never `round2`), and this
- * tolerance is now applied EXCLUSIVELY when NEITHER direction strictly meets the
- * target (the genuinely-unreachable physical-ceiling case). `0.05` was 2× the AC-7
- * gap and was the enabling mechanism for the Critical; `0.03` shrinks the
- * false-positive window without breaking AC-7.
+ * while staying far below any band gap we want to keep `met:false`. AC-4 (target 22,
+ * sRGB ceiling 21) has a gap of ≈1.0 and therefore stays `met:false`. `0.03` covers
+ * the AC-7 lighter gap (0.022) with headroom yet is tight enough that it does NOT
+ * widen the sub-threshold window: the round-2 Critical (a near-miss raw 2.998
+ * reported met:true for target 3 while a compliant color existed on the other side)
+ * is fixed primarily by deciding compliance on the RAW ratio (never `round2`), and
+ * this tolerance is now applied EXCLUSIVELY when NEITHER searched band strictly
+ * meets the target. `0.05` was 2× the AC-7 gap and was the enabling mechanism for
+ * the Critical; `0.03` shrinks the false-positive window without breaking AC-7.
  */
 const MET_TOL = 0.03;
 
@@ -73,10 +88,13 @@ export type SolveResultSingle = {
   ratio: number | null;
   /**
    * Present and `true` only when `met` was granted via the near-ceiling tolerance
-   * (the best achievable RAW ratio is within `MET_TOL` BELOW the target because the
-   * target is physically unreachable on every direction) rather than a genuine
-   * `raw >= target`. Absent (undefined) for strict-compliant and unmet results.
-   * Additive optional field — does not affect the all-optional output schema (AC-9).
+   * (ALG-6): the best achievable RAW ratio IN THE SEARCHED DIRECTION(S) is within
+   * `MET_TOL` BELOW the target, rather than a genuine `raw >= target`. This does NOT
+   * assert the target is unreachable on every direction — under a directional
+   * `prefer` ('lighter'/'darker') only that one band is searched, so the OTHER
+   * direction may still strictly meet the target. Absent (undefined) for
+   * strict-compliant and unmet results. Additive optional field — does not affect
+   * the all-optional output schema (AC-9).
    */
   nearMiss?: boolean;
 };
@@ -99,8 +117,21 @@ interface BandResult {
   nearMiss: boolean;
 }
 
-/** Output of `solveForContrast`: a single object or an object wrapping an array. */
-export type SolveOutput = SolveResultSingle | { results: SolveResultSingle[] };
+/**
+ * Typed boundary-failure codes (SOLVE-1 / CE-3). The lib stays TOTAL — it
+ * RETURNS these (discriminated on the `error` key) instead of throwing.
+ */
+export type SolveErrorCode = 'PARSE_FAILED' | 'ALPHA_UNSUPPORTED' | 'INVALID_GEOMETRY';
+
+/** Discriminated boundary failure: `{ error: code }` — no result fields. */
+export type SolveError = { error: SolveErrorCode };
+
+/**
+ * Output of `solveForContrast`: a single object, an object wrapping an array,
+ * or a discriminated boundary failure (`{ error: ... }` — check with
+ * `'error' in output` BEFORE reading result fields).
+ */
+export type SolveOutput = SolveResultSingle | { results: SolveResultSingle[] } | SolveError;
 
 /** Arguments accepted by the solver (mirrors `solveForContrastInput` raw shape). */
 export interface SolveArgs {
@@ -134,19 +165,47 @@ interface Candidate {
   candidateH: number;
 }
 
+/** Discriminated result of `resolveCandidate` (SOLVE-1: never a silent null). */
+type ResolveResult = { ok: true; cand: Candidate } | { ok: false; code: SolveErrorCode };
+
 /**
  * Build a finite candidate geometry from the parsed background plus any
- * hue/chroma overrides. Returns `null` when the background is unparseable or any
- * resolved component is non-finite (defence-in-depth over the `parseColor`
- * boundary — covers a residual `1e400` survivor, AC-8 / AC-5 NaN-hue).
+ * hue/chroma overrides. Returns a DISCRIMINATED failure (SOLVE-1) instead of
+ * the former silent `null`:
+ *   - `PARSE_FAILED`      — `parseColor` rejected the background (also covers the
+ *     parse-accepted-then-overflows AC-8 class, which parseColor rejects);
+ *   - `ALPHA_UNSUPPORTED` — the background parsed but carries alpha < 1 (CE-3);
+ *   - `INVALID_GEOMETRY`  — a resolved override component is non-finite or the
+ *     chroma is negative (direct-lib callers only; the tool validates first).
+ *
+ * HUE/CHROMA DEFAULT INTERPLAY (SOLVE-3, grounded here — documented in the
+ * schema describes, do not let them drift):
+ *   - `hue` WITHOUT `chroma`: chroma defaults to the BACKGROUND's own chroma,
+ *     which is 0 for achromatic backgrounds (white/grey/black) — the result is
+ *     then an achromatic gray and the fixed hue has no visible effect; pass
+ *     chroma explicitly to keep saturation when fixing hue.
+ *   - `chroma` WITHOUT `hue`: hue defaults to the background's hue when the
+ *     background is genuinely chromatic, else 0 (AC-5 NaN-hue guard).
  */
-function resolveCandidate(args: SolveArgs): Candidate | null {
+function resolveCandidate(args: SolveArgs): ResolveResult {
   const parsed = parseColor(args.background);
-  if (!parsed.ok) return null;
+  if (!parsed.ok) return { ok: false, code: 'PARSE_FAILED' };
+
+  // CE-3: WCAG 2.1 contrast is defined only for fully opaque colors. `parseColor`
+  // projects to opaque hex/RGB and does not surface alpha, so re-read it with the
+  // registered culori rgb converter on the trimmed string: alpha is `undefined`
+  // for opaque inputs (#rrggbb, rgb(), named) and `1` for an explicit `/ 1` —
+  // both pass; anything below 1 (rgba()/hsla()/#rgba/#rrggbbaa) is rejected.
+  const rawRgb = toRgb(args.background.trim());
+  if (rawRgb && rawRgb.alpha !== undefined && rawRgb.alpha < 1) {
+    return { ok: false, code: 'ALPHA_UNSUPPORTED' };
+  }
 
   const { l: bgL, c: bgC, h: bgH } = parsed.oklch;
 
-  // Fixed chroma: explicit override, else the background's own chroma.
+  // Fixed chroma: explicit override, else the background's own chroma (NOT 0 —
+  // see the SOLVE-3 interplay note above: this is 0 only when the background
+  // itself is achromatic).
   const candidateC = args.chroma ?? bgC;
 
   // Fixed hue: explicit override wins. Otherwise use the background hue only when
@@ -156,16 +215,18 @@ function resolveCandidate(args: SolveArgs): Candidate | null {
     args.hue ?? (Number.isFinite(bgH) && bgC > ACHROMATIC_CHROMA ? bgH : 0);
 
   // Finiteness guard BEFORE the search — no NaN/Infinity may enter the loop.
+  // `parseColor` guarantees finite background components, so this can only fire
+  // for direct-lib callers passing bad overrides (the tool rejects them earlier).
   if (
     !Number.isFinite(bgL) ||
     !Number.isFinite(candidateC) ||
     !Number.isFinite(candidateH) ||
     candidateC < 0
   ) {
-    return null;
+    return { ok: false, code: 'INVALID_GEOMETRY' };
   }
 
-  return { bgHex: parsed.hex, bgL, candidateC, candidateH };
+  return { ok: true, cand: { bgHex: parsed.hex, bgL, candidateC, candidateH } };
 }
 
 /**
@@ -283,13 +344,17 @@ function searchBand(cand: Candidate, lo: number, hi: number, target: number): Ba
         nearMiss: false,
       };
     }
-    // No strictly-compliant color in this band. Report the best attempt (peak) —
-    // never throw. If the band's physical ceiling sits within MET_TOL BELOW the
-    // target (a near-miss against the sRGB/luminance limit, e.g. white-vs-#777777
-    // ≈ 4.478 for target 4.5), treat it as a near-miss MET so callers that have NO
-    // strictly-compliant alternative still get a usable color. A genuinely-
-    // unreachable target (AC-4: ceiling 21 vs target 22, gap ≈1.0) stays met:false
-    // because its gap far exceeds MET_TOL.
+    // No strictly-compliant color in THIS band. Report the best attempt (peak) —
+    // never throw. If the best achievable raw ratio in this searched band sits
+    // within MET_TOL BELOW the target (a near-miss against the band's sRGB/luminance
+    // limit, e.g. white-vs-#777777 ≈ 4.478 for target 4.5), treat it as a near-miss
+    // MET so a caller searching this direction still gets a usable color. NOTE
+    // (ALG-6): this is a per-BAND decision — it does NOT mean the target is
+    // unreachable on every direction. Under a directional `prefer` only this band is
+    // searched, so the other direction may still strictly meet the target; in the
+    // 'either' path `solveSingle` prefers a strictly-compliant side over a near-miss.
+    // A target far above the band ceiling (AC-4: ceiling 21 vs target 22, gap ≈1.0)
+    // stays met:false because its gap far exceeds MET_TOL.
     if (peak) {
       const p = peak as { hex: string; ratio: number };
       const nearMiss = p.ratio >= target - MET_TOL;
@@ -418,21 +483,20 @@ function solveSingle(cand: Candidate, target: number, prefer: SolveArgs['prefer'
  *   `targets.length` items (AC-3).
  * - else `target` (single) → returns a single `{ met, color, ratio }` object.
  *
- * Never throws. An unparseable background or non-finite candidate geometry
- * yields `{ met: false, color: null, ratio: null }` (the tool wrapper maps
- * truly-malformed inputs to `isError:true` per AC-10).
+ * Never throws. Boundary failures (unparseable background, translucent
+ * background, bad direct-caller overrides) return a discriminated
+ * `{ error: SolveErrorCode }` on BOTH the single-target and the targets paths
+ * (SOLVE-1) — the candidate is resolved ONCE, before either path branches. The
+ * tool wrapper maps each code to its `isError:true` static message.
  */
 export function solveForContrast(args: SolveArgs): SolveOutput {
-  const cand = resolveCandidate(args);
+  const resolved = resolveCandidate(args);
+  if (!resolved.ok) return { error: resolved.code };
+  const cand = resolved.cand;
 
   if (Array.isArray(args.targets)) {
-    const results = args.targets.map((t) =>
-      cand ? solveSingle(cand, t, args.prefer) : { met: false, color: null, ratio: null }
-    );
-    return { results };
+    return { results: args.targets.map((t) => solveSingle(cand, t, args.prefer)) };
   }
 
-  const target = args.target as number;
-  if (!cand) return { met: false, color: null, ratio: null };
-  return solveSingle(cand, target, args.prefer);
+  return solveSingle(cand, args.target as number, args.prefer);
 }

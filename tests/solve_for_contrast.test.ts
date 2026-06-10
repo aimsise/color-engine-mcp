@@ -16,12 +16,14 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import * as z from 'zod/v4';
 import { formatHex, converter } from 'culori/fn';
 import { toOklch } from '../src/init.js'; // side-effect import registers culori rgb/oklch modes
 import { mapToSRGB } from '../src/lib/color/gamut.js';
 import { wcagContrastRaw } from '../src/utils/contrast.js';
 import { solveTool } from '../src/tools/solve_for_contrast.js';
 import { solveForContrast, type SolveResultSingle } from '../src/lib/color/solve.js';
+import { solveForContrastInput } from '../src/schemas/solve_for_contrast.js';
 import { oracleWcagContrast } from './helpers/oracle.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -41,6 +43,17 @@ function bgLightness(css: string): number {
 function asSingle(sc: unknown): SolveResultSingle {
   return sc as SolveResultSingle;
 }
+
+/** Pull content[0].text from a tool result (error-message assertions). */
+function errText(res: ReturnType<typeof solveTool>): string {
+  const c = res.content?.[0] as { type: string; text?: string } | undefined;
+  return c?.type === 'text' ? (c.text ?? '') : '';
+}
+
+/** Exact tool error messages (SOLVE-1 / CE-3 contract). */
+const PARSE_FAILED_MSG = 'PARSE_FAILED: could not parse the background color';
+const ALPHA_MSG =
+  'ALPHA_UNSUPPORTED: contrast requires fully opaque colors (alpha = 1); composite the color over its backdrop first';
 
 /** Smallest absolute angular difference between two hues, accounting for wrap. */
 function hueDelta(a: number, b: number): number {
@@ -380,6 +393,87 @@ describe('REGRESSION — prefer:"either" returns the genuinely-compliant side (r
 });
 
 // ---------------------------------------------------------------------------
+// TEST-3 — nearMiss reporting (ALG-6 / AC-7 convention) + schema round-trip
+//
+// MET_TOL = 0.03: when NO color in the searched direction strictly meets the
+// target, but the band's best RAW ratio is within MET_TOL BELOW the target, the
+// result is reported met:true with nearMiss:true (the 1-dp WCAG reporting
+// convention). The lighter ceiling for #777777 is white-vs-#777777 ≈ 4.478, so
+// target 4.5 (gap ≈0.022 < 0.03) is a near-miss MET; a target far enough above
+// the ceiling (gap > 0.03) stays met:false with NO nearMiss field.
+// ---------------------------------------------------------------------------
+
+describe('TEST-3 — solve nearMiss reporting + schema round-trip', () => {
+  it('#777777 lighter target 4.5 → met:true AND nearMiss===true (near the sRGB ceiling)', () => {
+    const r = asSingle(
+      solveTool({ background: '#777777', target: 4.5, prefer: 'lighter' }).structuredContent
+    );
+    expect(r.met).toBe(true);
+    expect(r.nearMiss).toBe(true);
+    // The reported color is the ceiling white; re-measure RAW with the independent
+    // colorjs.io oracle to confirm it is genuinely BELOW the target (a near-miss,
+    // not a strict pass) yet within MET_TOL — anti-circularity on the raw float.
+    const raw = oracleWcagContrast(r.color as string, '#777777');
+    expect(raw, `raw lighter ceiling = ${raw}`).toBeLessThan(4.5);
+    expect(raw, `raw lighter ceiling = ${raw}`).toBeGreaterThan(4.5 - 0.03);
+  });
+
+  it('a strictly-compliant case (#FFFFFF darker 4.5) has nearMiss undefined/absent', () => {
+    const r = asSingle(
+      solveTool({ background: '#FFFFFF', target: 4.5, prefer: 'darker' }).structuredContent
+    );
+    expect(r.met).toBe(true);
+    // nearMiss is an additive field present ONLY for tolerance-granted results.
+    expect(r.nearMiss).toBeUndefined();
+    expect('nearMiss' in (r as object)).toBe(false);
+    // Independent oracle confirms a genuine strict pass (raw >= target).
+    const raw = oracleWcagContrast(r.color as string, '#FFFFFF');
+    expect(raw, `raw strict = ${raw}`).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('a target just beyond MET_TOL above the lighter ceiling → met:false AND no nearMiss', () => {
+    // #777777 lighter ceiling ≈ 4.478; MET_TOL=0.03 → near-miss only up to ~4.508.
+    // target 4.55 has a gap ≈0.072 (> MET_TOL), so it must NOT be reported met.
+    const r = asSingle(
+      solveTool({ background: '#777777', target: 4.55, prefer: 'lighter' }).structuredContent
+    );
+    expect(r.met).toBe(false);
+    expect(r.nearMiss).toBeUndefined();
+    expect('nearMiss' in (r as object)).toBe(false);
+  });
+
+  it('schema round-trip: SolveForContrastOutputSchema preserves nearMiss', async () => {
+    const { SolveForContrastOutputSchema, SolveResultSchema } = await import(
+      '../src/schemas/solve_for_contrast.js'
+    );
+    const z = await import('zod/v4');
+
+    // A LIVE near-miss single result validates against the superset object schema
+    // WITH nearMiss intact (the superset mirrors nearMiss so MCP validateToolOutput
+    // does not strip it — T-6 hardening).
+    const single = solveForContrast({ background: '#777777', target: 4.5, prefer: 'lighter' });
+    expect((single as SolveResultSingle).nearMiss).toBe(true);
+    const superset = z.object(SolveForContrastOutputSchema);
+    const parsed = superset.safeParse(single);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect((parsed.data as { nearMiss?: boolean }).nearMiss).toBe(true);
+    }
+
+    // SolveResultSchema (the per-item schema used inside the `results` array)
+    // accepts and preserves the optional nearMiss flag.
+    const item = SolveResultSchema.safeParse({
+      met: true,
+      color: '#ffffff',
+      ratio: 4.48,
+      nearMiss: true,
+    });
+    expect(item.success).toBe(true);
+    if (item.success) expect(item.data.nearMiss).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // AC-8 — adversarial parse-accepted overflow (Infinity chroma)
 // ---------------------------------------------------------------------------
 
@@ -491,5 +585,201 @@ describe('sibling-guard — src/tools/solve_for_contrast.ts has no culori conver
     const src = readFileSync(join(repoRoot, 'src/tools/solve_for_contrast.ts'), 'utf-8');
     expect(src).not.toMatch(/\btoRgb\b/);
     expect(src).not.toMatch(/\btoOklch\b/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SOLVE-1 — unparseable background is a TYPED failure, not the silent
+// { met:false, color:null, ratio:null } sentinel (which falsely told an LLM the
+// target was unreachable). The tool returns isError:true with the exact static
+// message on BOTH the single-target and the targets paths; the lib signals the
+// failure with a discriminated { error: 'PARSE_FAILED' } return.
+// ---------------------------------------------------------------------------
+
+describe('SOLVE-1 — unparseable background → isError PARSE_FAILED on both paths', () => {
+  it('single-target path: isError:true, exact static message, no structuredContent', () => {
+    const res = solveTool({ background: 'not-a-color', target: 4.5 });
+    expect(res.isError).toBe(true);
+    expect(errText(res)).toBe(PARSE_FAILED_MSG);
+    expect(res.structuredContent).toBeUndefined();
+  });
+
+  it('targets path: isError:true, exact static message — never a silent results array', () => {
+    const res = solveTool({ background: 'not-a-color', targets: [3, 4.5, 7] });
+    expect(res.isError).toBe(true);
+    expect(errText(res)).toBe(PARSE_FAILED_MSG);
+    expect(res.structuredContent).toBeUndefined();
+  });
+
+  it('parse-accepted-then-overflows background (oklch 1e400 chroma) → same PARSE_FAILED on both paths', () => {
+    const single = solveTool({ background: 'oklch(0.5 1e400 30)', target: 4.5 });
+    expect(single.isError).toBe(true);
+    expect(errText(single)).toBe(PARSE_FAILED_MSG);
+
+    const multi = solveTool({ background: 'oklch(0.5 1e400 30)', targets: [4.5] });
+    expect(multi.isError).toBe(true);
+    expect(errText(multi)).toBe(PARSE_FAILED_MSG);
+  });
+
+  it('lib: discriminated { error: "PARSE_FAILED" } on both paths (old sentinel is gone)', () => {
+    expect(solveForContrast({ background: 'not-a-color', target: 4.5 })).toEqual({
+      error: 'PARSE_FAILED',
+    });
+    expect(solveForContrast({ background: 'not-a-color', targets: [3, 4.5] })).toEqual({
+      error: 'PARSE_FAILED',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SOLVE-2 — protocol-layer schema: targets is z.array(...).min(1).max(50)
+// ---------------------------------------------------------------------------
+
+describe('SOLVE-2 — input schema rejects an empty targets array', () => {
+  const inputSchema = z.object(solveForContrastInput);
+
+  it('targets: [] fails safeParse (min 1)', () => {
+    const r = inputSchema.safeParse({ background: '#ffffff', targets: [] });
+    expect(r.success).toBe(false);
+  });
+
+  it('targets: [4.5] (one element) passes safeParse', () => {
+    const r = inputSchema.safeParse({ background: '#ffffff', targets: [4.5] });
+    expect(r.success).toBe(true);
+  });
+
+  it('51 targets still rejected (max 50 kept alongside min 1)', () => {
+    const r = inputSchema.safeParse({
+      background: '#ffffff',
+      targets: Array.from({ length: 51 }, () => 4.5),
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('tool mirrors .min(1) for direct callers: targets [] → EMPTY_TARGETS isError', () => {
+    const res = solveTool({ background: '#ffffff', targets: [] });
+    expect(res.isError).toBe(true);
+    expect(errText(res)).toBe('EMPTY_TARGETS: targets must contain at least one target');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SOLVE-3 — hue/chroma default interplay: GROUNDED behavior, then asserted to
+// match the schema describes. The lib (resolveCandidate) does:
+//   candidateC = chroma ?? bgC          (NOT 0 — but bgC IS 0 for achromatic bgs)
+//   candidateH = hue ?? (chromatic bg ? bgH : 0)
+// Every assertion below re-measures the SOLVED hex with the independent culori
+// toOklch converter, never the solver's own internals.
+// ---------------------------------------------------------------------------
+
+describe('SOLVE-3 — hue/chroma default interplay (grounded contract)', () => {
+  it('hue WITHOUT chroma on an ACHROMATIC background → chroma defaults to bgC = 0 → achromatic gray despite hue:240', () => {
+    const res = solveTool({ background: '#FFFFFF', target: 4.5, hue: 240, prefer: 'darker' });
+    expect(res.isError).toBeUndefined();
+    const r = asSingle(res.structuredContent);
+    expect(r.met).toBe(true);
+    const c = toOklch(r.color as string)?.c ?? NaN;
+    expect(c, `solved chroma ${c} must be ~0 (white bgC=0; the hue had no effect)`).toBeLessThan(1e-3);
+  });
+
+  it('hue WITHOUT chroma on a CHROMATIC background → chroma defaults to the background chroma (not zeroed)', () => {
+    const bg = '#3366cc';
+    const bgC = toOklch(bg)?.c as number;
+    expect(bgC, 'grounding: #3366cc must be genuinely chromatic').toBeGreaterThan(0.05);
+
+    const res = solveTool({ background: bg, target: 3, hue: 30, prefer: 'lighter' });
+    expect(res.isError).toBeUndefined();
+    const r = asSingle(res.structuredContent);
+    expect(r.met).toBe(true);
+    const o = toOklch(r.color as string)!;
+    // Hue override held fixed; chroma inherited from the background (then gamut-
+    // limited along that hue — it may shrink but is never amplified or zeroed).
+    expect(hueDelta(o.h ?? 0, 30), `hue ${o.h} vs fixed 30`).toBeLessThanOrEqual(2);
+    expect(o.c ?? 0, 'chroma inherited from bg, not zeroed').toBeGreaterThan(0.02);
+    expect(o.c ?? 0, 'gamut clamp never amplifies past the inherited bgC').toBeLessThanOrEqual(bgC + 1e-6);
+  });
+
+  it('chroma WITHOUT hue on an ACHROMATIC background → hue defaults to 0', () => {
+    const res = solveTool({ background: '#FFFFFF', target: 4.5, chroma: 0.1, prefer: 'darker' });
+    expect(res.isError).toBeUndefined();
+    const r = asSingle(res.structuredContent);
+    expect(r.met).toBe(true);
+    const o = toOklch(r.color as string)!;
+    expect(o.c ?? 0, 'explicit chroma honored (saturated, not gray)').toBeGreaterThan(0.02);
+    expect(hueDelta(o.h ?? 0, 0), `hue ${o.h} should default to 0 for achromatic bg`).toBeLessThanOrEqual(2);
+  });
+
+  it('chroma WITHOUT hue on a CHROMATIC background → hue defaults to the background hue', () => {
+    const bg = '#3366cc';
+    const bgH = toOklch(bg)?.h as number;
+    expect(Number.isFinite(bgH), 'grounding: #3366cc has a finite oklch hue').toBe(true);
+
+    const res = solveTool({ background: bg, target: 3, chroma: 0.08, prefer: 'lighter' });
+    expect(res.isError).toBeUndefined();
+    const r = asSingle(res.structuredContent);
+    expect(r.met).toBe(true);
+    const o = toOklch(r.color as string)!;
+    expect(hueDelta(o.h ?? 0, bgH), `hue ${o.h} vs bg hue ${bgH}`).toBeLessThanOrEqual(2);
+    expect(o.c ?? 0, 'explicit chroma honored').toBeGreaterThan(0.02);
+  });
+
+  it('schema describes document the interplay truthfully, including the required sentence', () => {
+    const hueDesc = (solveForContrastInput.hue as { description?: string }).description ?? '';
+    const chromaDesc = (solveForContrastInput.chroma as { description?: string }).description ?? '';
+    const sentence = 'pass chroma explicitly to keep saturation when fixing hue';
+    expect(hueDesc).toContain(sentence);
+    expect(chromaDesc).toContain(sentence);
+    // hue: must state the achromatic-gray default (bgC, 0 for achromatic bgs).
+    expect(hueDesc.toLowerCase()).toContain('achromatic');
+    expect(hueDesc).toContain("background's own chroma");
+    // chroma: must state the hue default (bg hue, or 0 when achromatic).
+    expect(chromaDesc).toContain("background's hue");
+    expect(chromaDesc).toContain('0 when the background is achromatic');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CE-3 — translucent backgrounds (alpha < 1) are rejected with the exact same
+// ALPHA_UNSUPPORTED message as the contrast tool. Fully opaque inputs with an
+// EXPLICIT alpha of 1 (rgba(...,1)) remain accepted.
+// ---------------------------------------------------------------------------
+
+describe('CE-3 — background with alpha < 1 → isError ALPHA_UNSUPPORTED', () => {
+  const translucent: Array<{ name: string; bg: string }> = [
+    { name: 'rgba()', bg: 'rgba(255, 255, 255, 0.5)' },
+    { name: 'hsla()', bg: 'hsla(200, 50%, 50%, 0.25)' },
+    { name: '8-digit hex', bg: '#ffffff80' },
+    { name: '4-digit hex', bg: '#fff8' },
+  ];
+
+  for (const { name, bg } of translucent) {
+    it(`${name} background (single target) → isError:true with exact message`, () => {
+      const res = solveTool({ background: bg, target: 4.5 });
+      expect(res.isError).toBe(true);
+      expect(errText(res)).toBe(ALPHA_MSG);
+      expect(res.structuredContent).toBeUndefined();
+    });
+  }
+
+  it('targets path rejects a translucent background identically', () => {
+    const res = solveTool({ background: 'rgba(0, 0, 0, 0.9)', targets: [3, 4.5] });
+    expect(res.isError).toBe(true);
+    expect(errText(res)).toBe(ALPHA_MSG);
+    expect(res.structuredContent).toBeUndefined();
+  });
+
+  it('lib: discriminated { error: "ALPHA_UNSUPPORTED" }', () => {
+    expect(solveForContrast({ background: '#00000080', target: 4.5 })).toEqual({
+      error: 'ALPHA_UNSUPPORTED',
+    });
+  });
+
+  it('explicit alpha = 1 (fully opaque rgba) is still accepted and solves normally', () => {
+    const res = solveTool({ background: 'rgba(255, 255, 255, 1)', target: 4.5, prefer: 'darker' });
+    expect(res.isError).toBeUndefined();
+    const r = asSingle(res.structuredContent);
+    expect(r.met).toBe(true);
+    const raw = oracleWcagContrast(r.color as string, '#ffffff');
+    expect(raw, `raw = ${raw}`).toBeGreaterThanOrEqual(4.5);
   });
 });

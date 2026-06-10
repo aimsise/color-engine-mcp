@@ -214,6 +214,187 @@ describe('AC-4 — all outputs in sRGB gamut', () => {
 });
 
 // ---------------------------------------------------------------------------
+// CE-1 — wide-gamut CSS inputs are accepted (modes registered in src/init.ts)
+// ---------------------------------------------------------------------------
+
+describe('CE-1 — gamut_map accepts wide-gamut CSS inputs', () => {
+  it('color(display-p3 1 0 0) → clamped:true and a valid in-sRGB hex', () => {
+    const r = gamutMapColor('color(display-p3 1 0 0)');
+    expect(r.clamped, 'P3 red is outside sRGB — must be clamped').toBe(true);
+    expect(r.hex).toMatch(/^#[0-9a-f]{6}$/);
+    expect(inRgbGamut(r.hex)).toBe(true);
+    // Perceptual mapping keeps it close to the input (raw ΔE_OK, anti-circular).
+    expect(rawDeltaE('color(display-p3 1 0 0)', r.hex)).toBeLessThan(0.5);
+  });
+
+  it('tool path: gamutMapTool("color(display-p3 1 0 0)") → structured success', () => {
+    const res = gamutMapTool('color(display-p3 1 0 0)');
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as { hex: string; clamped: boolean };
+    expect(sc.clamped).toBe(true);
+    expect(sc.hex).toMatch(/^#[0-9a-f]{6}$/);
+  });
+
+  for (const input of [
+    'lab(50% 40 59.5)',
+    'lch(52.2% 72.2 50)',
+    'oklab(0.59 0.1 0.12)',
+    'hwb(194 0% 0%)',
+    'color(rec2020 0.6 0.3 0.2)',
+    'color(a98-rgb 1 0 0)',
+    'color(xyz-d65 0.4 0.2 0.1)',
+  ]) {
+    it(`${input}: parses and maps to a valid in-sRGB hex (no PARSE_FAILED)`, () => {
+      const r = gamutMapColor(input);
+      expect(r.hex).toMatch(/^#[0-9a-f]{6}$/);
+      expect(inRgbGamut(r.hex)).toBe(true);
+      expect(typeof r.clamped).toBe('boolean');
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CE-2 — in-gamut identity short-circuit + exact idempotency
+// ---------------------------------------------------------------------------
+
+describe('CE-2 — in-gamut inputs return identically (identity short-circuit)', () => {
+  it('gamut_map("#00ffff") returns hex "#00ffff" exactly, clamped:false', () => {
+    const r = gamutMapColor('#00ffff');
+    expect(r.hex).toBe('#00ffff'); // the raw bisection mapper drifted to #01ffff
+    expect(r.clamped).toBe(false);
+  });
+
+  it('in-gamut inputs return the canonical formatHex of the input', () => {
+    for (const [input, canonical] of [
+      ['#ff0000', '#ff0000'],
+      ['#808080', '#808080'],
+      ['#1A2B3C', '#1a2b3c'],
+      ['rgb(26,43,60)', '#1a2b3c'],
+    ] as const) {
+      const r = gamutMapColor(input);
+      expect(r.hex, `gamut_map(${input})`).toBe(canonical);
+      expect(r.clamped).toBe(false);
+    }
+  });
+
+  it('identity result carries the raw OKLCH projection of the input', () => {
+    const r = gamutMapColor('#1a2b3c');
+    const o = toOklch('#1a2b3c')!;
+    expect(r.oklch.l).toBe(o.l);
+    expect(r.oklch.c).toBe(o.c);
+    expect(r.oklch.h).toBe(o.h ?? 0);
+  });
+
+  it('EXACT idempotency: gamut_map(gamut_map(x).hex).hex === gamut_map(x).hex for all fixtures', () => {
+    for (const input of ALL_TEST_COLORS) {
+      const first = gamutMapColor(input);
+      const second = gamutMapColor(first.hex);
+      expect(second.hex, `idempotency for ${input}`).toBe(first.hex);
+      expect(second.clamped, 'a mapped output is in gamut — second pass must be identity').toBe(
+        false
+      );
+    }
+  });
+
+  it('EC-PROPERTY: 300 seeded-LCG in-gamut colors are returned bit-identically (clamped:false)', () => {
+    // Deterministic numeric-recipe LCG (Numerical Recipes constants) — NO
+    // built-in randomness, so every run sweeps the exact same 300 colors.
+    let state = 0xc0ffee >>> 0;
+    const next = (): number => {
+      state = (Math.imul(1664525, state) + 1013904223) >>> 0;
+      return state;
+    };
+    for (let i = 0; i < 300; i++) {
+      // Top 24 bits → canonical lowercase #rrggbb (every hex color is in sRGB).
+      const hex = '#' + (next() >>> 8).toString(16).padStart(6, '0');
+      const r = gamutMapColor(hex);
+      expect(r.hex, `identity for seeded color #${i} (${hex})`).toBe(hex);
+      expect(r.clamped, `clamped:false for ${hex}`).toBe(false);
+      // Idempotency on the property sweep too: re-mapping returns the same hex.
+      expect(gamutMapColor(r.hex).hex).toBe(hex);
+    }
+  });
+
+  it('whitespace-padded in-gamut input is trimmed and returns the canonical hex', () => {
+    const r = gamutMapColor('  #00ffff  ');
+    expect(r.hex).toBe('#00ffff');
+    expect(r.clamped).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CE-4 — parse-boundary clamping must NOT swallow out-of-gamut oklch inputs
+// ---------------------------------------------------------------------------
+
+describe('CE-4 — out-of-gamut oklch() input still reaches the mapper unclamped', () => {
+  it('gamut_map("oklch(0.7 0.25 30)") reports clamped:true with an in-sRGB hex', () => {
+    const r = gamutMapColor('oklch(0.7 0.25 30)');
+    expect(r.clamped, 'oklch(0.7 0.25 30) is outside sRGB — clamping must be reported').toBe(true);
+    expect(inRgbGamut(r.hex)).toBe(true);
+    // Hue preserved by the perceptual mapper (raw, anti-circular).
+    const outOklch = toOklch(r.hex)!;
+    expect(Math.abs((outOklch.h ?? 0) - 30)).toBeLessThanOrEqual(2);
+  });
+
+  it('tool path: gamutMapTool("oklch(0.7 0.25 30)") → structured clamped:true', () => {
+    const res = gamutMapTool('oklch(0.7 0.25 30)');
+    expect(res.isError).toBeFalsy();
+    expect((res.structuredContent as { clamped: boolean }).clamped).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CE-6 — absurd-magnitude finite components → typed COMPONENT_OUT_OF_RANGE
+// ---------------------------------------------------------------------------
+
+describe('CE-6 — gamutMapColor rejects absurd finite L/hue with COMPONENT_OUT_OF_RANGE', () => {
+  const EXPECTED =
+    'COMPONENT_OUT_OF_RANGE: color component magnitude exceeds the supported range';
+
+  it('huge finite hue: gamutMapColor("oklch(0.5 0.1 1e30)") throws typed GamutError', () => {
+    expect(() => gamutMapColor('oklch(0.5 0.1 1e30)')).toThrow(GamutError);
+    try {
+      gamutMapColor('oklch(0.5 0.1 1e30)');
+    } catch (e) {
+      expect((e as Error).message).toBe(EXPECTED);
+    }
+  });
+
+  it('huge finite L (via color(xyz-d65 …) whose OKLCH L ≈ 4.7e6) throws typed GamutError', () => {
+    expect(() => gamutMapColor('color(xyz-d65 1e20 1e20 1e20)')).toThrow(GamutError);
+    try {
+      gamutMapColor('color(xyz-d65 1e20 1e20 1e20)');
+    } catch (e) {
+      expect((e as Error).message).toBe(EXPECTED);
+    }
+  });
+
+  it('tool path forwards COMPONENT_OUT_OF_RANGE verbatim (never INTERNAL_ERROR)', () => {
+    for (const input of ['oklch(0.5 0.1 1e30)', 'color(xyz-d65 1e20 1e20 1e20)']) {
+      const res = gamutMapTool(input);
+      expect(res.isError, `${input} must be isError`).toBe(true);
+      const text =
+        res.content?.[0]?.type === 'text'
+          ? (res.content[0] as { type: string; text: string }).text
+          : '';
+      expect(text).toBe(EXPECTED);
+      expect(text).not.toContain('INTERNAL_ERROR');
+    }
+  });
+
+  it('huge chroma keeps the dedicated CHROMA_OUT_OF_RANGE code (CE-6 does not absorb it)', () => {
+    // 1e30 chroma at sane L/h: the chroma axis is owned by MAX_FINITE_CHROMA.
+    try {
+      gamutMapColor('oklch(0.5 1e30 30)');
+      expect.unreachable('must throw');
+    } catch (e) {
+      expect(e).toBeInstanceOf(GamutError);
+      expect((e as Error).message).toContain('CHROMA_OUT_OF_RANGE');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // AC-5 — adversarial / non-finite input
 // ---------------------------------------------------------------------------
 
@@ -286,7 +467,11 @@ describe('AC-5 — adversarial non-finite input (parse-accepted overflow)', () =
     const text = result.content?.[0]?.type === 'text' ? (result.content[0] as { type: string; text: string }).text : '';
     expect(text).not.toMatch(/-32602/);
     expect(text).not.toMatch(/NaN/);
-    expect(text).toMatch(/GamutError/);
+    // MCP-2 uniform error contract: the text is a clean "<CODE>: msg" domain-error
+    // string (here CHROMA_OUT_OF_RANGE — 1e300 exceeds MAX_FINITE_CHROMA), NOT the
+    // old "GamutError" class-name prefix and NOT a leaked SDK/internal detail.
+    expect(text).toMatch(/^[A-Z][A-Z0-9_]*: /);
+    expect(text).toContain('CHROMA_OUT_OF_RANGE');
   });
 
   it('finite-huge chroma sweep: 1e200, 1e300, 1e308 all return clean isError', { timeout: 2000 }, () => {

@@ -1,8 +1,16 @@
 import '../init.js'; // side-effect: register culori modes (MUST be first import)
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { generateRamp } from '../lib/color/ramp.js';
+import {
+  generateRamp,
+  formatRampTokens,
+  DEFAULT_TOKEN_NAME,
+  type TokenFormat,
+  type RampSwatch,
+} from '../lib/color/ramp.js';
 import { parseColor } from '../lib/color/parse.js';
+import { GamutError } from '../lib/color/gamut.js';
+import { ContrastError } from '../utils/contrast.js';
 import { generateRampInput, GenerateRampOutputSchema } from '../schemas/generate_ramp.js';
 import { validateColorComponents } from '../shared/validation.js';
 
@@ -13,6 +21,10 @@ export interface GenerateRampArgs {
   lightnessMin?: number;
   lightnessMax?: number;
   deltaL?: number;
+  /** Optional design-token output format; when present the result includes `tokens`. */
+  tokenFormat?: TokenFormat;
+  /** Token base name (validated by the schema regex). Default "color". */
+  tokenName?: string;
 }
 
 /**
@@ -49,21 +61,41 @@ export function generateRampTool(args: GenerateRampArgs): CallToolResult {
       deltaL: args.deltaL,
     });
     if (!r.ok) {
+      // r.error is now a full "<CODE>: msg" string (STEPS_OUT_OF_RANGE,
+      // INVALID_DELTA_L, INVALID_LIGHTNESS_RANGE, BASE_CHROMA_OUT_OF_RANGE,
+      // PARSE_FAILED, INPUT_TOO_LONG, INTERNAL_ERROR, ...) — forward verbatim.
       return {
-        content: [{ type: 'text', text: `RampError: ${r.error}` }],
+        content: [{ type: 'text', text: r.error }],
         isError: true,
       };
     }
     // Object-shaped structuredContent (wrap the array — see schema R1 comment).
-    const payload = { swatches: r.swatches };
+    // TOKENS: `tokens` is added ONLY when the request asked for a tokenFormat
+    // (the output schema declares it optional). tokenName falls back to the
+    // documented default "color"; its shape is enforced by the schema regex at
+    // the MCP boundary.
+    const payload: { swatches: RampSwatch[]; tokens?: string } = { swatches: r.swatches };
+    if (args.tokenFormat) {
+      payload.tokens = formatRampTokens(
+        r.swatches,
+        args.tokenFormat,
+        args.tokenName ?? DEFAULT_TOKEN_NAME
+      );
+    }
     return {
       content: [{ type: 'text', text: JSON.stringify(payload) }],
       structuredContent: payload,
     };
   } catch (e) {
-    // Mask unexpected internals so nothing leaks across the MCP boundary.
+    // SEC-2: do NOT forward arbitrary e.message (a future library throw could embed
+    // input-derived text — info-disclosure channel). generateRamp is TOTAL and
+    // wraps its swatch loop, so this path is defence-in-depth. Forward e.message
+    // ONLY for known domain errors (GamutError/ContrastError, whose message is
+    // already a vetted "<CODE>: msg" code string); otherwise the uniform catch-all.
     const errText =
-      e instanceof Error ? `RampError: ${e.message}` : 'RampError: INTERNAL_ERROR';
+      e instanceof GamutError || e instanceof ContrastError
+        ? e.message
+        : 'INTERNAL_ERROR: unexpected internal error';
     return {
       content: [{ type: 'text', text: errText }],
       isError: true,
@@ -77,9 +109,17 @@ export function registerGenerateRamp(server: McpServer): void {
     'generate_ramp',
     {
       description:
-        'Generate a tint-to-shade color ramp from a base CSS color. Returns an ordered list of swatches (light → dark) each with its in-gamut hex, raw OKLCH components, WCAG contrast ratios + tiers vs white and black, and an in-gamut flag.',
+        'Generate a tint-to-shade color ramp from a base CSS color. Returns an ordered list of swatches (light → dark) each with its in-gamut hex, display-rounded OKLCH components (l/c 5dp, h 2dp), WCAG contrast ratios (2dp) + tiers vs white and black, and an in-gamut flag. Optionally emits the ramp as design tokens via tokenFormat ("tailwind" JSON or a "css-variables" :root block).',
       inputSchema: generateRampInput,
       outputSchema: GenerateRampOutputSchema,
+      // MCP-1: read-only, side-effect-free, deterministic, local-only computation.
+      annotations: {
+        title: 'Generate Color Ramp',
+        readOnlyHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+        destructiveHint: false,
+      },
     },
     async (args) => generateRampTool(args as GenerateRampArgs)
   );

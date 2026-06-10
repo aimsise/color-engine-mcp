@@ -1,7 +1,7 @@
 import '../../init.js'; // side-effect: register culori modes (MUST be first import — AC-11)
 import { inGamut, toGamut, differenceEuclidean, formatHex } from 'culori/fn';
 import type { Color } from 'culori';
-import { toOklch } from '../../init.js';
+import { toOklch, toRgb } from '../../init.js';
 
 // ---------------------------------------------------------------------------
 // Typed error for gamut-mapping failures.
@@ -28,6 +28,23 @@ export class GamutError extends Error {
 const ACHROMATIC_CHROMA = 1e-4;
 
 /**
+ * SEC-1: hard cap on the accepted color-string length, mirroring the
+ * `MAX_INPUT_LENGTH` guard at the top of `parseColor` (src/lib/color/parse.ts).
+ * Enforced at the top of `gamutMapColor` itself so DIRECT lib callers — not just
+ * MCP traffic bounded by the schema `.max(256)` — are capped before any culori
+ * tokenization work happens.
+ */
+const MAX_INPUT_LENGTH = 256;
+
+/**
+ * CE-6: maximum accepted magnitude for a finite OKLCH lightness/hue component.
+ * Mirrors `MAX_COMPONENT_MAGNITUDE` in src/shared/validation.ts and parse.ts.
+ * Chroma is deliberately NOT covered here — it keeps its dedicated, lower
+ * `MAX_FINITE_CHROMA` ceiling (CHROMA_OUT_OF_RANGE) in `assertFiniteOklch`.
+ */
+const MAX_COMPONENT_MAGNITUDE = 1e6;
+
+/**
  * Maximum physically realizable OKLCH chroma accepted by the gamut mapper.
  *
  * Rationale for the value (100):
@@ -43,8 +60,12 @@ const ACHROMATIC_CHROMA = 1e-4;
  *     (the hang band starts around 1e140).
  *   - This guard runs at the shared `mapToSRGB` boundary so T5/T6 siblings inherit
  *     the protection automatically.
+ *
+ * EXPORTED so `ramp.ts` reuses the SAME ceiling for its base-chroma validation
+ * (BASE_CHROMA_OUT_OF_RANGE) — a single source of truth for the gamut-mapper's
+ * accepted chroma ceiling.
  */
-const MAX_FINITE_CHROMA = 100;
+export const MAX_FINITE_CHROMA = 100;
 
 // ---------------------------------------------------------------------------
 // Guard: rejects non-finite OKLCH components before they reach the raw mapper.
@@ -76,15 +97,17 @@ const MAX_FINITE_CHROMA = 100;
  * an infinite loop that occurs during the map.
  */
 export function assertFiniteOklch(l: number, c: number, h: number): void {
+  // Error messages are full "<CODE>: msg" strings (MCP-2): the tool forwards
+  // `e.message` verbatim, so it must already be the uniform contract shape.
   if (!Number.isFinite(l) || !Number.isFinite(c)) {
-    throw new GamutError('NON_FINITE_OKLCH_COMPONENTS');
+    throw new GamutError('NON_FINITE_OKLCH_COMPONENTS: OKLCH components are non-finite');
   }
   if (c > MAX_FINITE_CHROMA) {
-    throw new GamutError('CHROMA_OUT_OF_RANGE');
+    throw new GamutError('CHROMA_OUT_OF_RANGE: OKLCH chroma exceeds the supported maximum (100)');
   }
   const hNonFinite = c > ACHROMATIC_CHROMA && !Number.isFinite(h);
   if (hNonFinite) {
-    throw new GamutError('NON_FINITE_OKLCH_HUE');
+    throw new GamutError('NON_FINITE_OKLCH_HUE: OKLCH hue is non-finite for a chromatic color');
   }
 }
 
@@ -114,6 +137,29 @@ const _rawToGamut = toGamut(
 // Module-level predicate so the closure is created only once.
 const inRgbGamut = inGamut('rgb');
 
+/**
+ * FP-drift tolerance for the `mapToSRGB` in-gamut pass-through (CE-2/BASE-PRESENCE).
+ *
+ * culori's strict `inGamut('rgb')` returns FALSE for the exact OKLCH projection
+ * of sRGB primaries (e.g. #00ffff) because the OKLCH→RGB round-trip leaves
+ * channels ~1e-14 outside [0, 1] (measured empirically: max drift 2.9e-14
+ * across all sRGB primaries). 1e-9 is 5 orders of magnitude above that drift
+ * yet 6+ orders of magnitude below the 8-bit hex quantum (1/255 ≈ 3.9e-3) and
+ * the mapper's own 0.02 OKLCH JND, so passing such colors through unchanged is
+ * bit-identical at the hex level to what a "perfect" clamp would produce.
+ */
+const RGB_GAMUT_EPSILON = 1e-9;
+
+/** True when `v` is a finite number within [0 − ε, 1 + ε]. */
+function channelInGamut(v: unknown): boolean {
+  return (
+    typeof v === 'number' &&
+    Number.isFinite(v) &&
+    v >= -RGB_GAMUT_EPSILON &&
+    v <= 1 + RGB_GAMUT_EPSILON
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Public guarded gamut-mapper (wraps the raw singleton).
 // ---------------------------------------------------------------------------
@@ -126,7 +172,12 @@ const inRgbGamut = inGamut('rgb');
  *   3. `assertFiniteOklch` — rejects non-finite fields (NaN/Infinity) and chroma
  *      values above `MAX_FINITE_CHROMA` (prevents culori bisection from hanging on
  *      finite-huge chroma like 1e150 that pass `Number.isFinite` but loop forever).
- *   4. Post-map null-channel validation — detects any residual finite-but-enormous
+ *   4. In-gamut pass-through — colors already inside the sRGB gamut (within
+ *      RGB_GAMUT_EPSILON of [0,1] per channel, tolerating OKLCH↔RGB round-trip
+ *      drift) are returned UNCHANGED, never perturbed by the bisection mapper.
+ *      This is what guarantees an in-gamut ramp base reappears verbatim
+ *      (BASE-PRESENCE) and that gamut mapping is idempotent at this boundary.
+ *   5. Post-map null-channel validation — detects any residual finite-but-enormous
  *      chroma that culori collapses to `{r:null, g:null, b:null}`.
  *
  * This is the shared boundary: ALL callers (gamutMapColor, future T5/T6 siblings)
@@ -142,18 +193,36 @@ export function mapToSRGB(color: Color): Color {
   const oklch = toOklch(color);
   // W1: reject if culori cannot convert the color to OKLCH at all.
   if (!oklch) {
-    throw new GamutError('PARSE_FAILED');
+    throw new GamutError('PARSE_FAILED: could not parse the provided color string');
   }
   // W2: treat null/undefined channels as an error — do NOT promote them to 0
   // via `?? 0`, which would silently pass a pre-collapsed Color through the guard.
   if (oklch.l == null || oklch.c == null) {
-    throw new GamutError('NULL_OKLCH_CHANNELS');
+    throw new GamutError('NULL_OKLCH_CHANNELS: OKLCH channels are null');
   }
   // h may legitimately be undefined/NaN for achromatic colors (c ≈ 0); pass 0
   // as the sentinel only for that case — assertFiniteOklch skips hue check when
   // c ≤ ACHROMATIC_CHROMA anyway.
   const hVal = oklch.h ?? 0;
   assertFiniteOklch(oklch.l, oklch.c, hVal);
+
+  // Pass-through invariant (CE-2 / BASE-PRESENCE): already-in-gamut colors are
+  // returned UNCHANGED instead of being run through the bisection mapper, which
+  // can perturb exact colors (e.g. #00ffff → #01ffff). The check is
+  // epsilon-tolerant (see RGB_GAMUT_EPSILON) because strict inGamut('rgb') on
+  // an OKLCH object round-trips through RGB with ~1e-14 floating-point drift
+  // and would falsely report sRGB primaries as out-of-gamut. Downstream
+  // `formatHex` clamps that sub-quantum drift, so the resulting hex is exactly
+  // the canonical hex of the input.
+  const rgbProjection = toRgb(color);
+  if (
+    rgbProjection &&
+    channelInGamut(rgbProjection.r) &&
+    channelInGamut(rgbProjection.g) &&
+    channelInGamut(rgbProjection.b)
+  ) {
+    return color;
+  }
 
   const mapped = _rawToGamut(color);
 
@@ -189,35 +258,89 @@ export function inGamutRgb(color: Color | string): boolean {
 /**
  * Full-flow gamut-mapping lib function.
  *
+ * 0. SEC-1 length cap (typed INPUT_TOO_LONG) + whitespace trim — BEFORE any
+ *    culori work, mirroring `parseColor`, so direct lib callers are bounded.
  * 1. Parse `input` to an OKLCH culori object via `toOklch`.
+ * 1a. CE-6: reject absurd-magnitude finite L/hue with a typed
+ *     COMPONENT_OUT_OF_RANGE error (chroma keeps CHROMA_OUT_OF_RANGE below).
  * 2. `mapToSRGB` runs `assertFiniteOklch` at its entry (AC-7 shared-boundary guard)
  *    and validates that the mapped result has finite channels.
- * 3. Compute `clamped` = `!inGamutRgb(input)` on the raw input string (pre-mapping).
+ * 3. Compute `clamped` = `!inGamutRgb(input)` on the trimmed input string
+ *    (pre-mapping).
+ * 3a. CE-2: when the input is ALREADY inside the sRGB gamut, short-circuit to an
+ *     identity result — `hex` is exactly the canonical `formatHex` of the input
+ *     (never perturbed by the bisection mapper, which can drift, e.g. #00ffff →
+ *     #01ffff), `clamped` is false, deltaE is 0 by construction, and `oklch` is
+ *     the raw projection of the input itself. This also makes the function
+ *     idempotent: its own output hex is always in-gamut, so re-mapping it takes
+ *     the identity path and returns the identical hex.
  * 4. Apply `mapToSRGB` (perceptual chroma reduction via bisection in OKLCH).
  * 5. `formatHex` the MAPPED result — NEVER the raw input.
  * 6. Re-extract raw OKLCH of the mapped result and return `{ hex, oklch, clamped }`.
  *
- * Throws `GamutError` on unparseable, non-finite, or null-collapse input.
+ * Throws `GamutError` on oversize, unparseable, absurd-magnitude, non-finite,
+ * or null-collapse input.
  */
 export function gamutMapColor(input: string): {
   hex: string;
   oklch: { l: number; c: number; h: number };
   clamped: boolean;
 } {
+  // Step 0: SEC-1 length/type cap — typed error, BEFORE any culori tokenization,
+  // so direct lib callers (bypassing the SDK schema .max(256)) fail fast.
+  if (typeof input !== 'string') {
+    throw new GamutError('INPUT_TOO_LONG: color string exceeds 256 characters');
+  }
+  const trimmed = input.trim();
+  if (trimmed.length > MAX_INPUT_LENGTH) {
+    throw new GamutError('INPUT_TOO_LONG: color string exceeds 256 characters');
+  }
+
   // Step 1: parse to OKLCH.
-  const parsed = toOklch(input);
+  const parsed = toOklch(trimmed);
   if (!parsed) {
-    throw new GamutError('PARSE_FAILED: could not parse color input');
+    throw new GamutError('PARSE_FAILED: could not parse the provided color string');
+  }
+
+  // Step 1a: CE-6 — absurd-magnitude but FINITE lightness/hue (e.g. the OKLCH
+  // projection of color(xyz-d65 1e20 …), or oklch(0.5 0.1 1e30) whose huge hue
+  // survives parsing). These previously flowed into the mapper and produced
+  // garbage or surfaced as INTERNAL_ERROR at the tool layer. Chroma is excluded:
+  // assertFiniteOklch's MAX_FINITE_CHROMA guard owns that axis
+  // (CHROMA_OUT_OF_RANGE). Non-finite values fall through to the existing
+  // NON_FINITE_* guards in mapToSRGB.
+  const componentAbsurd = (v: number | undefined): boolean =>
+    typeof v === 'number' && Number.isFinite(v) && Math.abs(v) > MAX_COMPONENT_MAGNITUDE;
+  if (componentAbsurd(parsed.l) || componentAbsurd(parsed.h)) {
+    throw new GamutError(
+      'COMPONENT_OUT_OF_RANGE: color component magnitude exceeds the supported range'
+    );
   }
 
   // Step 3: clamped = out-of-gamut BEFORE mapping.
-  // IMPORTANT: Call inGamut on the raw input STRING — NOT on the OKLCH object.
+  // IMPORTANT: Call inGamut on the trimmed input STRING — NOT on the OKLCH object.
   // culori's inGamut('rgb') applied to an OKLCH object round-trips through RGB
   // conversion and may return false for exact sRGB primaries (e.g. #ff0000)
   // due to floating-point drift. Using the original input string or an RGB
   // representation avoids this. `inRgbGamut(string)` converts internally to
   // RGB first, giving an accurate result.
-  const clamped = !inRgbGamut(input);
+  const clamped = !inRgbGamut(trimmed);
+
+  // Step 3a: CE-2 identity short-circuit for already-in-gamut inputs.
+  // formatHex(string) parses the string straight to RGB (no OKLCH round-trip),
+  // so the returned hex is EXACTLY the canonical hex of the input.
+  if (!clamped) {
+    const hex = formatHex(trimmed);
+    if (!hex) {
+      // Defensive: toOklch parsed it above, so this cannot normally happen.
+      throw new GamutError('PARSE_FAILED: could not parse the provided color string');
+    }
+    return {
+      hex,
+      oklch: { l: parsed.l, c: parsed.c, h: parsed.h ?? 0 },
+      clamped: false,
+    };
+  }
 
   // Step 4: perceptual gamut mapping (chroma reduction in OKLCH).
   // mapToSRGB runs assertFiniteOklch at its entry AND validates the mapped result.
