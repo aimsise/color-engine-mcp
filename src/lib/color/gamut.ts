@@ -297,10 +297,29 @@ export function gamutMapColor(input: string): {
   }
 
   // Step 1: parse to OKLCH.
-  const parsed = toOklch(trimmed);
-  if (!parsed) {
+  const parsedRaw = toOklch(trimmed);
+  if (!parsedRaw) {
     throw new GamutError('PARSE_FAILED: could not parse the provided color string');
   }
+
+  // Step 1b (CSS-NONE): CSS Color 4 `none` channels (e.g. `oklch(0.5 none 30)`)
+  // parse to MISSING culori fields (`undefined`, not NaN). Per the CSS Color 4
+  // computed-value rules a `none` channel behaves as 0 in conversions — culori's
+  // own converters already do exactly that (the string projects to #636363 and
+  // passes inGamut), and `parseColor` resolves the same string the same way.
+  // Normalize l/c/h to 0 HERE, before every guard and both result paths, so all
+  // downstream values are defined finite numbers and gamut_map stays consistent
+  // with parse_color. Without this, the identity short-circuit (step 3a) emitted
+  // `oklch.c: undefined`, which escaped the mapToSRGB guards (never reached on
+  // that path) and failed the SDK output schema with a leaked -32602.
+  // `??` promotes ONLY null/undefined — NaN/Infinity still flow into the
+  // existing NON_FINITE_* / CHROMA_OUT_OF_RANGE guards untouched.
+  const parsed = {
+    ...parsedRaw,
+    l: parsedRaw.l ?? 0,
+    c: parsedRaw.c ?? 0,
+    h: parsedRaw.h ?? 0,
+  };
 
   // Step 1a: CE-6 — absurd-magnitude but FINITE lightness/hue (e.g. the OKLCH
   // projection of color(xyz-d65 1e20 …), or oklch(0.5 0.1 1e30) whose huge hue

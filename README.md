@@ -37,7 +37,9 @@ A wide-gamut input outside sRGB parses fine and reports `inGamut: false`:
 
 **CSS Color 4 channel clamping (legacy spaces only).** Out-of-range channels in hex / `rgb()` / `hsl()` inputs are clamped at the parse boundary, per CSS Color 4: `rgb(-50 0 0)` behaves exactly as `rgb(0 0 0)` (verified live: it parses to `#000000`, `inGamut: true`), and `hsl()` saturation/lightness clamp likewise (hue wraps). Inputs in **other** modes (`oklch()`, `lab()`, `color(display-p3 …)`, …) are **not** clamped — their out-of-gamut values flow through raw, which is what makes `gamut_map` useful.
 
-**Component magnitude.** A parseable component with an absurd magnitude (above 1e6, e.g. `oklch(0.5 1e30 30)`) is rejected with the typed error `COMPONENT_OUT_OF_RANGE: color component magnitude exceeds the supported range` (previously this surfaced as `INTERNAL_ERROR`). Real out-of-gamut values are many orders of magnitude below this guard and are never affected.
+**`none` channels.** CSS Color 4 `none` channels are normalized to `0` at the shared parse boundary in all six tools: `oklch(0.5 none 30)` behaves exactly as `oklch(0.5 0 30)` (verified live: every tool resolves it to the gray `#636363`), and `rgb(255 none 0)` behaves exactly as `rgb(255 0 0)` (every tool resolves it to `#ff0000`). When the normalized color ends up **outside** the sRGB gamut (e.g. `oklch(none 0.2 30)`, which behaves as the out-of-gamut `oklch(0 0.2 30)`), each tool then applies its usual out-of-gamut handling — exactly as for any other out-of-gamut input: `parse_color`/`convert_color` report the channel-clamped projection (here `#080000`, `inGamut: false`) while `gamut_map` returns the perceptually mapped color (here `#000000`, `clamped: true`), so their hexes can legitimately differ for such inputs.
+
+**Component magnitude.** A parseable component with an absurd magnitude (above 1e6, e.g. `oklch(0.5 1e30 30)`) is rejected with the typed error `COMPONENT_OUT_OF_RANGE: color component magnitude exceeds the supported range` by `parse_color`, `convert_color`, `contrast`, and `generate_ramp` (previously this surfaced as `INTERNAL_ERROR`). Two tools surface it differently (both verified live): `gamut_map`'s deliberate chroma-first guard fires before the generic magnitude check, so for `oklch(0.5 1e30 30)` it returns `CHROMA_OUT_OF_RANGE: OKLCH chroma exceeds the supported maximum (100)`; and `solve_for_contrast` coalesces every parse-boundary failure of its `background` into its parameter-named `PARSE_FAILED`. Real out-of-gamut values are many orders of magnitude below these guards and are never affected.
 
 **Alpha policy.** `contrast` and `solve_for_contrast` **reject** translucent colors — any explicit alpha `< 1`, including `rgba()`/`hsla()` functional alpha and 4-/8-digit hex (`#00000080`) — with `ALPHA_UNSUPPORTED`, because the effective color of a translucent layer depends on an unknown backdrop; composite over the backdrop first. Alpha exactly `1` (e.g. `rgb(255 0 0 / 1)`) is allowed. All **other** tools accept translucent input and simply **ignore** the alpha channel: computations and outputs use the opaque color (e.g. `convert_color` of `rgb(255 0 0 / 0.5)` to hex returns `"#ff0000"`), and no output ever carries an alpha component.
 
@@ -228,7 +230,7 @@ Each swatch carries `vsWhite` / `vsBlack`, each `{ ratio, tier }` where `ratio` 
 
 **Validation rules**
 
-The numeric constraints are declared in the tool schema, so the MCP SDK rejects out-of-range calls at the protocol layer (JSON-RPC `-32602` invalid params) before the handler runs; the matching tool-level error codes below are retained as defense-in-depth for direct library callers:
+The numeric constraints are declared in the tool schema, so the MCP SDK rejects out-of-range calls **before the handler runs**. In SDK 1.29 that rejection arrives as an in-band error result (`isError: true`) whose SDK-generated text begins `MCP error -32602: Input validation error: …`, not as one of the tool-level codes below (see [Schema-layer vs tool-layer enforcement](#schema-layer-vs-tool-layer-enforcement)); the matching tool-level error codes are retained as defense-in-depth for direct library callers:
 
 - `steps` must be an integer in `[2, 512]` → otherwise `STEPS_OUT_OF_RANGE`.
 - `deltaL`, when provided, must be a finite number `> 0` → otherwise `INVALID_DELTA_L`. It defines the **total** lightness span centered on the base L (endpoints at base L ± deltaL/2) and **overrides** `lightnessMin`/`lightnessMax`.
@@ -355,40 +357,57 @@ The catch-all for any unexpected internal fault is always:
 INTERNAL_ERROR: unexpected internal error
 ```
 
-### Protocol-layer vs tool-layer enforcement
+### Schema-layer vs tool-layer enforcement
 
-Constraints that are declared in the tools' zod input schemas are enforced by the MCP SDK **at the protocol layer**: an out-of-contract call is rejected with a JSON-RPC `-32602` (invalid params) error *before the tool handler runs*, so over MCP you will normally see that protocol error rather than the corresponding tool-level code. The tool-level codes are **retained as defense-in-depth** for direct library callers (code that imports the handlers or `src/lib` functions and bypasses SDK validation). Protocol-enforced constraints:
+Constraints declared in the tools' zod input schemas are enforced by the MCP SDK **before the tool handler runs**: the handler never executes and the result carries no `structuredContent`. The wire shape of that rejection is an SDK detail worth knowing. In MCP SDK 1.29 it is **not** a true JSON-RPC protocol error — the SDK catches its own invalid-params exception inside its CallTool handler and re-wraps it, so the rejection arrives **in-band** as an error-flagged tool result (`isError: true`) whose text begins `MCP error -32602: Input validation error: …` followed by the zod issue details. Genuine example, captured live for a 300-character `parse_color` input (rejected by the `.max(256)` schema cap):
+
+```
+MCP error -32602: Input validation error: Invalid arguments for tool parse_color: [
+  {
+    "origin": "string",
+    "code": "too_big",
+    "maximum": 256,
+    "inclusive": true,
+    "path": [
+      "input"
+    ],
+    "message": "Too big: expected string to have <=256 characters"
+  }
+]
+```
+
+That text is generated by the MCP SDK, **not** by this server's tools — the uniform `CODE: message` format and the no-internals guarantee described above apply to **tool-layer** errors only. Future SDK versions may surface a true `-32602` protocol error instead, so don't pattern-match on the exact SDK wording. The tool-level codes are **retained as defense-in-depth** for direct library callers (code that imports the handlers or `src/lib` functions and bypasses SDK validation). Schema-enforced constraints:
 
 - `INPUT_TOO_LONG` — every color-string field declares `.max(256)`.
 - `STEPS_OUT_OF_RANGE` — `steps` declares integer `2..512`.
 - `INVALID_DELTA_L` — `deltaL` declares finite `> 0`.
 - `TOO_MANY_TARGETS` — `targets` declares `.max(50)`.
-- `EMPTY_TARGETS` — `targets` declares `.min(1)` (an empty array is rejected at the protocol layer).
+- `EMPTY_TARGETS` — `targets` declares `.min(1)` (an empty array is rejected pre-handler).
 - The finiteness/sign constraints behind `INVALID_TARGET`, `INVALID_CHROMA`, and `INVALID_HUE` are likewise schema-declared (and non-finite numbers are not representable in JSON anyway).
 
 ### Error codes
 
 | Code | Meaning |
 |------|---------|
-| `INPUT_TOO_LONG` | A color string exceeded the 256-character cap (DoS guard, enforced before parsing; schema-enforced at the protocol layer). |
+| `INPUT_TOO_LONG` | A color string exceeded the 256-character cap (DoS guard, enforced before parsing; schema-enforced — over MCP rejected pre-handler by the SDK). |
 | `PARSE_FAILED` | The provided color string could not be parsed as any CSS color. In `contrast` and `solve_for_contrast` the static message names the failing **parameter**: `could not parse the foreground color` / `could not parse the background color`. |
-| `COMPONENT_OUT_OF_RANGE` | A parseable color component had an absurd magnitude (> 1e6), e.g. `oklch(0.5 1e30 30)`. Previously surfaced as `INTERNAL_ERROR`. |
+| `COMPONENT_OUT_OF_RANGE` | A parseable color component had an absurd magnitude (> 1e6), e.g. `oklch(0.5 1e30 30)` — returned by `parse_color`, `convert_color`, `contrast`, and `generate_ramp`. **Exception:** `gamut_map` rejects that same input with `CHROMA_OUT_OF_RANGE` (its chroma guard fires first), and `solve_for_contrast` reports it as parameter-named `PARSE_FAILED`. Previously surfaced as `INTERNAL_ERROR`. |
 | `ALPHA_UNSUPPORTED` | `contrast` / `solve_for_contrast` received a translucent color (explicit alpha < 1, including 4-/8-digit hex). Composite over the backdrop first. |
 | `NON_FINITE_COMPONENTS` | The color resolved to non-finite RGB/OKLCH components (e.g. an overflowing chroma). |
 | `NON_FINITE_LUMINANCE` | Contrast computation produced a non-finite luminance. |
 | `NON_FINITE_OKLCH_COMPONENTS` | OKLCH lightness/chroma were non-finite during gamut mapping. |
 | `NULL_OKLCH_CHANNELS` | OKLCH channels resolved to null during gamut mapping. |
 | `NON_FINITE_OKLCH_HUE` | OKLCH hue was non-finite for a chromatic color during gamut mapping. |
-| `CHROMA_OUT_OF_RANGE` | OKLCH chroma exceeded the gamut mapper's supported maximum (100). |
+| `CHROMA_OUT_OF_RANGE` | OKLCH chroma exceeded the gamut mapper's supported maximum (100). This is what `gamut_map` returns for `oklch(0.5 1e30 30)` (verified live) — not `COMPONENT_OUT_OF_RANGE`. |
 | `GAMUT_MAP_COLLAPSE` | Gamut mapping collapsed to null/non-finite channels. |
-| `STEPS_OUT_OF_RANGE` | `generate_ramp` `steps` was not an integer in `[2, 512]` (schema-enforced at the protocol layer). |
+| `STEPS_OUT_OF_RANGE` | `generate_ramp` `steps` was not an integer in `[2, 512]` (schema-enforced — over MCP rejected pre-handler by the SDK). |
 | `INVALID_LIGHTNESS_RANGE` | `generate_ramp` resolved `lightnessMin >= lightnessMax`. |
-| `INVALID_DELTA_L` | `generate_ramp` `deltaL` was not a finite number `> 0` (schema-enforced at the protocol layer). |
+| `INVALID_DELTA_L` | `generate_ramp` `deltaL` was not a finite number `> 0` (schema-enforced — over MCP rejected pre-handler by the SDK). |
 | `BASE_CHROMA_OUT_OF_RANGE` | `generate_ramp` base OKLCH chroma exceeded 100. |
 | `MISSING_BACKGROUND` | `solve_for_contrast` was called without a `background`. |
 | `MISSING_TARGET` | `solve_for_contrast` was called with neither `target` nor `targets`. |
-| `EMPTY_TARGETS` | `solve_for_contrast` `targets` was an empty array (schema-enforced at the protocol layer via `.min(1)`). |
-| `TOO_MANY_TARGETS` | `solve_for_contrast` `targets` exceeded 50 entries (schema-enforced at the protocol layer). |
+| `EMPTY_TARGETS` | `solve_for_contrast` `targets` was an empty array (schema-enforced via `.min(1)` — over MCP rejected pre-handler by the SDK). |
+| `TOO_MANY_TARGETS` | `solve_for_contrast` `targets` exceeded 50 entries (schema-enforced — over MCP rejected pre-handler by the SDK). |
 | `INVALID_TARGET` | A `solve_for_contrast` target was not a finite number `>= 0`. |
 | `INVALID_CHROMA` | `solve_for_contrast` `chroma` was not a finite number `>= 0`. |
 | `INVALID_HUE` | `solve_for_contrast` `hue` was not a finite number. |

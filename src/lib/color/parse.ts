@@ -1,5 +1,5 @@
 import '../../init.js'; // side-effect: register culori modes (MUST be first import — AC-11)
-import { formatHex, parse } from 'culori/fn';
+import { formatHex, getMode, parse } from 'culori/fn';
 import type { Color } from 'culori';
 import { toRgb, toOklch } from '../../init.js';
 import { inGamutRgb } from './gamut.js';
@@ -50,11 +50,38 @@ const COMPONENT_OUT_OF_RANGE_ERROR =
   'COMPONENT_OUT_OF_RANGE: color component magnitude exceeds the supported range';
 
 /**
- * CE-4: clamp a 0-1 channel per CSS Color 4. `undefined` (a `none` token) is
- * preserved so the downstream finite guard keeps its existing behavior.
+ * CSS-NONE: normalize CSS Color 4 `none` channels to 0, per the CSS Color 4
+ * computed-value rule. culori parses a `none` token as a MISSING field
+ * (`undefined`, not NaN). Its CROSS-mode converters already treat a missing
+ * channel as 0, but a SAME-mode "conversion" (e.g. `toRgb` on an already-rgb
+ * object) is an identity that never fills the gap, so `rgb(255 none 0)`
+ * previously tripped the finite-RGB guard below (NON_FINITE_COMPONENTS) in
+ * every tool routed through this boundary. Filling the missing channels HERE —
+ * at the shared parse boundary, mirroring the `?? 0` normalization in
+ * `gamutMapColor` (src/lib/color/gamut.ts) — makes all six tools treat `none`
+ * as 0 for every parsed mode.
+ *
+ * `alpha` is deliberately skipped: a missing alpha means fully opaque (1), NOT
+ * transparent (0), and the alpha-policy checks in contrast/solve_for_contrast
+ * rely on that distinction.
  */
-function clamp01(v: number | undefined): number | undefined {
-  if (v === undefined) return undefined;
+function fillNoneChannels(parsed: Color): Color {
+  const definition = getMode(parsed.mode) as { channels: readonly string[] } | undefined;
+  if (!definition) return parsed; // defensive: parse only emits registered modes
+  const out: Record<string, unknown> = { ...parsed };
+  for (const channel of definition.channels) {
+    if (channel !== 'alpha' && out[channel] === undefined) {
+      out[channel] = 0;
+    }
+  }
+  return out as unknown as Color;
+}
+
+/**
+ * CE-4: clamp a 0-1 channel per CSS Color 4. `none` channels were already
+ * normalized to 0 by `fillNoneChannels`, so `v` is always a number here.
+ */
+function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
@@ -146,11 +173,17 @@ export function parseColor(input: string): ParseResult {
     return { ok: false, error: 'PARSE_FAILED: could not parse the provided color string' };
   }
 
-  // 1a. CE-4: clamp rgb()/hex/hsl() channels per CSS Color 4 at the parse
-  //     boundary. Other modes (oklch, lab, …) flow through UNclamped.
-  const color = clampLegacyModes(raw);
+  // 1a. CSS-NONE: normalize `none` channels (missing culori fields) to 0 per
+  //     the CSS Color 4 computed-value rule, BEFORE any guard, so a same-mode
+  //     no-op conversion (e.g. rgb(255 none 0) → toRgb) cannot leak an
+  //     undefined channel into the finite-RGB guard below.
+  const filled = fillNoneChannels(raw);
 
-  // 1b. CE-6: absurd-magnitude but FINITE components (e.g. chroma 1e30) get a
+  // 1b. CE-4: clamp rgb()/hex/hsl() channels per CSS Color 4 at the parse
+  //     boundary. Other modes (oklch, lab, …) flow through UNclamped.
+  const color = clampLegacyModes(filled);
+
+  // 1c. CE-6: absurd-magnitude but FINITE components (e.g. chroma 1e30) get a
   //     typed error instead of surfacing later as INTERNAL_ERROR. Runs after the
   //     legacy clamp so a CSS-clamped rgb(1e30 0 0) correctly behaves as
   //     rgb(255 0 0) rather than being rejected.

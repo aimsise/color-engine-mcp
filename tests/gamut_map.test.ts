@@ -20,6 +20,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Color from 'colorjs.io';
+import * as z from 'zod/v4';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, '..');
@@ -27,6 +28,8 @@ import { inGamut, differenceEuclidean } from 'culori/fn';
 import { toOklch } from '../src/init.js';
 import { gamutMapTool } from '../src/tools/gamut_map.js';
 import { gamutMapColor, assertFiniteOklch, GamutError } from '../src/lib/color/gamut.js';
+import { parseColor } from '../src/lib/color/parse.js';
+import { GamutMapOutputSchema } from '../src/schemas/gamut_map.js';
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -582,6 +585,97 @@ describe('AC-5 — adversarial non-finite input (parse-accepted overflow)', () =
       }
     }
   );
+});
+
+// ---------------------------------------------------------------------------
+// CSS-NONE — CSS Color 4 `none` channels behave as 0 (computed-value rules),
+// consistently with parse_color. Regression: oklch(0.5 none 30) previously
+// escaped the guards via the identity short-circuit with oklch.c undefined and
+// the SDK output schema leaked a -32602 validation error.
+// ---------------------------------------------------------------------------
+
+describe('CSS-NONE — none channels are treated as 0, consistently with parse_color', () => {
+  it('gamutMapColor("oklch(0.5 none 30)") → #636363, clamped:false, all OKLCH fields numeric', () => {
+    const r = gamutMapColor('oklch(0.5 none 30)');
+    expect(r.hex).toBe('#636363');
+    expect(r.clamped).toBe(false);
+    expect(r.oklch.l).toBe(0.5);
+    expect(r.oklch.c).toBe(0); // `none` chroma → 0, NEVER undefined
+    expect(r.oklch.h).toBe(30);
+    for (const [k, v] of Object.entries(r.oklch)) {
+      expect(typeof v, `oklch.${k} must be a number`).toBe('number');
+      expect(Number.isFinite(v as number), `oklch.${k} must be finite`).toBe(true);
+    }
+  });
+
+  it('gamutMapColor("oklch(none 0.2 30)") → no throw, defined finite OKLCH, in-sRGB hex', () => {
+    // `none` lightness behaves as l:0 → out of sRGB gamut → mapped, never an error.
+    const r = gamutMapColor('oklch(none 0.2 30)');
+    expect(r.hex).toMatch(/^#[0-9a-f]{6}$/);
+    expect(inRgbGamut(r.hex)).toBe(true);
+    expect(r.clamped).toBe(true);
+    for (const [k, v] of Object.entries(r.oklch)) {
+      expect(Number.isFinite(v as number), `oklch.${k} must be finite`).toBe(true);
+    }
+  });
+
+  it('gamutMapColor("oklch(0.5 0.2 none)") → no throw, hue resolves to 0, clamped:false', () => {
+    // `none` hue behaves as h:0; oklch(0.5 0.2 0) is inside sRGB → identity path.
+    const r = gamutMapColor('oklch(0.5 0.2 none)');
+    expect(r.hex).toMatch(/^#[0-9a-f]{6}$/);
+    expect(inRgbGamut(r.hex)).toBe(true);
+    expect(r.clamped).toBe(false);
+    expect(r.oklch.l).toBe(0.5);
+    expect(r.oklch.c).toBe(0.2);
+    expect(r.oklch.h).toBe(0);
+  });
+
+  it('tool path: structuredContent zod-parses against the registered output schema', () => {
+    const res = gamutMapTool('oklch(0.5 none 30)');
+    expect(res.isError, 'none chroma must NOT be a tool error').toBeFalsy();
+    expect(res.structuredContent).toBeDefined();
+    // Exactly the schema registered via registerTool (raw shape → z.object wrap,
+    // mirroring what the SDK does) — this is what previously failed with -32602.
+    const parsed = z.object(GamutMapOutputSchema).parse(res.structuredContent);
+    expect(parsed.hex).toBe('#636363');
+    expect(parsed.clamped).toBe(false);
+    expect(parsed.oklch.c).toBe(0);
+  });
+
+  it('consistency with parse_color: same hex (#636363) for the same none-input', () => {
+    const p = parseColor('oklch(0.5 none 30)');
+    expect(p.ok).toBe(true);
+    if (!p.ok) return;
+    const g = gamutMapColor('oklch(0.5 none 30)');
+    expect(g.hex).toBe(p.hex);
+    expect(g.hex).toBe('#636363');
+  });
+
+  it('schema-parse holds across all none-channel variants (no undefined leaks)', () => {
+    for (const input of ['oklch(0.5 none 30)', 'oklch(none 0.2 30)', 'oklch(0.5 0.2 none)']) {
+      const res = gamutMapTool(input);
+      expect(res.isError, `${input} must not error`).toBeFalsy();
+      expect(() => z.object(GamutMapOutputSchema).parse(res.structuredContent),
+        `${input} structuredContent must satisfy the registered output schema`).not.toThrow();
+    }
+  });
+
+  it('legacy-space none channels do not error: hsl(none 50% 50%) and rgb(255 none 0)', () => {
+    for (const [input, expectedHex] of [
+      ['hsl(none 50% 50%)', '#bf4040'],
+      ['rgb(255 none 0)', '#ff0000'],
+    ] as const) {
+      const r = gamutMapColor(input);
+      expect(r.hex, `gamutMapColor(${input})`).toBe(expectedHex);
+      expect(r.clamped).toBe(false);
+      for (const [k, v] of Object.entries(r.oklch)) {
+        expect(Number.isFinite(v as number), `${input} oklch.${k} must be finite`).toBe(true);
+      }
+      const res = gamutMapTool(input);
+      expect(res.isError, `${input} tool path must not error`).toBeFalsy();
+      expect(() => z.object(GamutMapOutputSchema).parse(res.structuredContent)).not.toThrow();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

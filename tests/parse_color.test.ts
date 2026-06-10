@@ -5,6 +5,14 @@ import { describe, it, expect } from 'vitest';
 import { oracleOklch } from './helpers/oracle.js';
 import { parseColor } from '../src/lib/color/parse.js';
 import { parseColorTool } from '../src/tools/parse_color.js';
+// CSS-NONE cross-tool regression imports — the none→0 normalization lives at
+// the SHARED parse boundary, so its regression block exercises every tool
+// routed through parseColor (gamut_map normalizes none → 0 itself).
+import { convertColorTool } from '../src/tools/convert_color.js';
+import { contrastTool } from '../src/tools/contrast.js';
+import { generateRampTool } from '../src/tools/generate_ramp.js';
+import { solveTool } from '../src/tools/solve_for_contrast.js';
+import { gamutMapColor } from '../src/lib/color/gamut.js';
 
 const TOL = 1e-4;
 
@@ -379,5 +387,80 @@ describe('AC-9 oklch object shape + achromatic special case', () => {
     expect(r.oklch.c).toBeLessThanOrEqual(1e-4);
     expect(Number.isFinite(r.oklch.h)).toBe(true); // 0 fallback, satisfies schema
     expect(Math.abs(r.oklch.l - o.l)).toBeLessThanOrEqual(TOL);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CSS-NONE — `none` channels normalize to 0 at the SHARED parse boundary.
+// Regression (live-verifier blocker): culori parses a `none` token as a MISSING
+// field, and a SAME-mode "conversion" (toRgb on an already-rgb object) is an
+// identity that never fills the gap, so `rgb(255 none 0)` previously tripped
+// the finite-RGB guard (NON_FINITE_COMPONENTS) in every tool routed through
+// parseColor, while gamut_map (which normalizes none → 0 itself in
+// gamutMapColor) accepted it — an inconsistency across the six tools.
+// ---------------------------------------------------------------------------
+
+describe('CSS-NONE — rgb-mode none channels normalize to 0 at the shared parse boundary', () => {
+  it('parseColor("rgb(255 none 0)") → ok, #ff0000, in gamut — behaves as rgb(255 0 0)', () => {
+    const r = parseColor('rgb(255 none 0)');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.hex).toBe('#ff0000');
+    expect(r.rgb).toEqual({ r: 255, g: 0, b: 0 });
+    expect(r.inGamut).toBe(true);
+  });
+
+  it('hex is consistent with gamut_map for the same none-input (the blocker repro)', () => {
+    const p = parseColor('rgb(255 none 0)');
+    expect(p.ok).toBe(true);
+    if (!p.ok) return;
+    const g = gamutMapColor('rgb(255 none 0)');
+    expect(g.hex).toBe(p.hex);
+    expect(g.hex).toBe('#ff0000');
+    expect(g.clamped).toBe(false);
+  });
+
+  it('other same-mode none variants parse as 0: hsl(none 50% 50%) → #bf4040, lab/oklch ok', () => {
+    const hsl = parseColor('hsl(none 50% 50%)');
+    expect(hsl.ok).toBe(true);
+    if (!hsl.ok) return;
+    expect(hsl.hex).toBe('#bf4040'); // identical to hsl(0 50% 50%)
+    expect(parseColor('lab(50 none 40)').ok).toBe(true);
+    expect(parseColor('oklch(0.5 0.2 none)').ok).toBe(true);
+  });
+
+  it('out-of-gamut none input oklch(none 0.2 30): channel-clamped projection, inGamut:false', () => {
+    // none lightness behaves as l:0 → oklch(0 0.2 30) is OUT of sRGB gamut.
+    // parse_color reports the raw channel-clamped projection (its documented
+    // out-of-gamut handling); gamut_map perceptually maps the same input to
+    // #000000 — the hexes legitimately differ, as for any out-of-gamut color.
+    const r = parseColor('oklch(none 0.2 30)');
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.hex).toBe('#080000');
+    expect(r.inGamut).toBe(false);
+  });
+
+  it('missing alpha is NOT normalized to 0 — absent alpha means opaque, not transparent', () => {
+    // If the none-fill wrongly zeroed alpha, the CE-3 translucency guard would
+    // reject every alpha-less color in contrast/solve_for_contrast.
+    const res = contrastTool('rgb(255 none 0)', '#ffffff');
+    expect(res.isError, 'opaque none-input must not trip ALPHA_UNSUPPORTED').toBeFalsy();
+    // ...and an EXPLICIT translucent alpha still trips it.
+    const translucent = contrastTool('rgb(255 0 0 / 0.5)', '#ffffff');
+    expect(translucent.isError).toBe(true);
+  });
+
+  it('all five parseColor-routed tools accept rgb(255 none 0) (cross-tool consistency)', () => {
+    expect(parseColorTool('rgb(255 none 0)').isError, 'parse_color').toBeFalsy();
+    const conv = convertColorTool('rgb(255 none 0)', 'hex');
+    expect(conv.isError, 'convert_color').toBeFalsy();
+    expect((conv.structuredContent as { result: string }).result).toBe('#ff0000');
+    expect(contrastTool('rgb(255 none 0)', '#ffffff').isError, 'contrast').toBeFalsy();
+    expect(generateRampTool({ base: 'rgb(255 none 0)', steps: 3 }).isError, 'generate_ramp').toBeFalsy();
+    expect(
+      solveTool({ background: 'rgb(255 none 0)', target: 4.5 }).isError,
+      'solve_for_contrast'
+    ).toBeFalsy();
   });
 });
