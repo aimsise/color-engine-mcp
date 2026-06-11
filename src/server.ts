@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import './init.js'; // side-effect: register culori modes
 import { registerParseColor } from './tools/parse_color.js';
@@ -14,7 +15,7 @@ export const server = new McpServer(
   {
     name: 'color-engine',
     title: 'Color Engine',
-    version: '1.0.0',
+    version: '1.0.1',
   },
   {
     instructions: [
@@ -41,8 +42,20 @@ registerGamutMap(server);
 registerGenerateRamp(server);
 registerSolveForContrast(server);
 
-// Only connect transport when run as entrypoint (not when imported by tests)
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Only connect transport when run as entrypoint (not when imported by tests).
+// argv[1] must be realpath'd: npm bin shims invoke this file through a
+// symlink (node_modules/.bin/color-engine-mcp), while import.meta.url is
+// already symlink-resolved by the ESM loader — a raw comparison never
+// matches under npx and the server would exit without connecting.
+const isEntrypoint = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+if (isEntrypoint) {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }

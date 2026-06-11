@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-06-11
+
+### Fixed
+
+- The bin entrypoint never started when launched through an npm bin shim
+  (`npx color-engine-mcp` or a `node_modules/.bin` symlink): the entrypoint
+  guard compared the raw `process.argv[1]` (the symlink path) against the
+  ESM-realpath'd `import.meta.url`, never matched, and the process exited
+  silently with code 0 without connecting the stdio transport. `argv[1]` is
+  now `realpath`'d before the comparison. Direct `node dist/server.js`
+  invocation and test imports were unaffected, which is why the 1.0.0 test
+  suite passed. Added a symlink-invocation regression test.
+  **v1.0.0 is unusable via `npx` — upgrade to 1.0.1.**
+
 ## [1.0.0] - 2026-06-10
 
 Initial release of `color-engine-mcp`, a stdio MCP server exposing six pure,
@@ -130,4 +144,5 @@ in-memory CSS-color tools: `parse_color`, `convert_color`, `contrast`,
   (GHSA-w7jw-789q-3m8p affects <= 1.8.3); `npm audit` reports 0
   vulnerabilities.
 
+[1.0.1]: https://github.com/aimsise/color-engine-mcp/releases/tag/v1.0.1
 [1.0.0]: https://github.com/aimsise/color-engine-mcp/releases/tag/v1.0.0

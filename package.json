@@ -1,6 +1,6 @@
 {
   "name": "color-engine-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "mcpName": "io.github.aimsise/color-engine-mcp",
   "description": "stdio MCP server exposing six pure, in-memory CSS-color tools: parse, convert, WCAG contrast, sRGB gamut mapping, OKLCH color-ramp generation, and contrast solving.",
   "license": "MIT",
